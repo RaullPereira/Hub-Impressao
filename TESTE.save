@@ -1,0 +1,38 @@
+const { app, BrowserWindow } = require('electron');
+const path = require('path');
+const express = require('express');
+const cors = require('cors');
+
+let mainWindow = null;
+
+function startServer() {
+  const expressApp = express();
+  expressApp.use(cors());
+  expressApp.use(express.json());
+
+  expressApp.get('/health', (req, res) => {
+    res.json({ status: 'ok' });
+  });
+
+  expressApp.post('/api/print', (req, res) => {
+    console.log('Pedido recebido:', req.body);
+    res.json({ success: true });
+  });
+
+  expressApp.listen(3001, () => {
+    console.log('Servidor na porta 3001');
+  });
+}
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 900,
+    height: 700
+  });
+  mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+}
+
+app.whenReady().then(() => {
+  startServer();
+  createWindow();
+});

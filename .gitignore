@@ -1,0 +1,23 @@
+# Dependências
+node_modules/
+node_modules/**
+
+# Builds
+dist/
+dist/**
+build/
+build/**
+out/
+out/**
+release/
+release/**
+
+# Instaladores
+*.exe
+*.dmg
+*.app
+*.blockmap
+
+# Sistema
+.DS_Store
+**/.DS_Store

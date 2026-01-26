@@ -1,7 +1,11 @@
 {
-  "name": "thermal-print-service",
+  "name": "@raullpereira/hub-impressao",
   "version": "1.0.0",
   "description": "Serviço de impressão térmica em background",
+  "author": "Raull Pereira",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com/"
+  },
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
@@ -43,5 +47,13 @@
       "icon": "assets/icons/app.ico",
       "target": "nsis"
     }
+    ,
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "RaullPereira",
+        "repo": "Hub-Impressao"
+      }
+    ]
   }
 }

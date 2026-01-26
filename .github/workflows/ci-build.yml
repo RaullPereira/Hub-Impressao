@@ -70,6 +70,7 @@ jobs:
       - name: Build win (electron-builder)
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        shell: bash
         run: |
           set -o pipefail
           npx electron-builder --win --publish=never 2>&1 | tee build-win.log

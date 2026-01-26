@@ -55,10 +55,16 @@ jobs:
       - name: Install system deps (Windows)
         shell: powershell
         run: |
-          choco install libusb -y || Write-Host 'choco install failed or already installed'
+          choco install libusb -y || Write-Host 'choco install libusb failed or already installed'
+          choco install nsis -y || Write-Host 'choco install nsis failed or already installed'
+          # Install Visual Studio Build Tools (may take several minutes)
+          choco install visualstudio2019buildtools -y --package-parameters "--add Microsoft.VisualStudio.Workload.VCTools" || Write-Host 'visualstudio2019buildtools install failed or already installed'
 
       - name: Install dependencies
         run: npm ci
+      - name: Rebuild native modules
+        run: |
+          npm rebuild --build-from-source || true
 
       - name: Build win (electron-builder)
         env:

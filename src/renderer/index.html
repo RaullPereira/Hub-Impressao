@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Thermal Print Service</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🖨️ Thermal Print Service</h1>
+      <p class="subtitle">Configurações e Monitoramento</p>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="dashboard">Dashboard</button>
+      <button class="tab" data-tab="printers">Impressoras</button>
+    </nav>
+
+    <!-- Dashboard Tab -->
+    <div class="tab-content active" id="dashboard">
+      <div class="cards">
+        <div class="card">
+          <h3>Status do Serviço</h3>
+          <div class="status-indicator online">
+            <span class="dot"></span> Online
+          </div>
+          <p class="info">Porta: 3001</p>
+        </div>
+
+        <div class="card">
+          <h3>Impressoras</h3>
+          <p class="big-number" id="printer-count">0</p>
+          <p class="label">Disponíveis</p>
+        </div>
+
+        <div class="card">
+          <h3>API</h3>
+          <p class="info"><code>http://localhost:3001/api</code></p>
+          <p class="info"><code>ws://localhost:3001</code></p>
+        </div>
+      </div>
+
+      <div class="card logs">
+        <h3>Últimos Eventos</h3>
+        <div id="logs" class="log-container">
+          <p class="log-entry">Sistema iniciado...</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Printers Tab -->
+    <div class="tab-content" id="printers">
+      <div class="toolbar">
+        <button class="btn btn-primary" id="refresh-printers">
+          🔄 Atualizar Lista
+        </button>
+      </div>
+
+      <div id="printer-list" class="printer-list">
+        <p class="loading">Carregando impressoras...</p>
+      </div>
+      
+      <div class="test-section">
+        <h3>Testar Impressão</h3>
+        <div class="test-controls">
+          <select id="test-printer" class="printer-select">
+            <option value="">Selecione uma impressora</option>
+          </select>
+          <button class="btn btn-success" onclick="testPrint()">🧪 Imprimir Teste</button>
+        </div>
+        <div id="settings-status" class="status-message" style="margin-top:12px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

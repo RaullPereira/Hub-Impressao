@@ -1,0 +1,169 @@
+// src/main/printer/manager.js
+
+const { EventEmitter } = require('events');
+const escpos = require('escpos');
+escpos.USB = require('escpos-usb');
+escpos.Network = require('escpos-network');
+// const Bluetooth = require('escpos-bluetooth');
+const usb = require('usb');
+const logger = require('../utils/logger');
+
+class PrinterManager extends EventEmitter {
+  constructor() {
+    super();
+    this.printers = new Map();
+    this.discoverPrinters();
+  }
+
+  discoverPrinters() {
+    // USB Printers - busca detalhada e atualização automática
+    try {
+      this.printers.clear();
+      const usbDevices = escpos.USB.findPrinter();
+      usbDevices.forEach((device, index) => {
+        const desc = device.deviceDescriptor;
+        let name = `USB ${desc.idVendor.toString(16)}:${desc.idProduct.toString(16)}`;
+        // Tenta obter fabricante/produto
+        if (desc.iManufacturer || desc.iProduct) {
+          try {
+            device.open();
+            device.getStringDescriptor(desc.iManufacturer, (err, data) => {
+              if (!err && data) name = data;
+              device.getStringDescriptor(desc.iProduct, (err2, data2) => {
+                if (!err2 && data2) name += ' ' + data2;
+                device.close();
+              });
+            });
+          } catch (e) {}
+        }
+        const id = `usb-${desc.idVendor.toString(16)}-${desc.idProduct.toString(16)}`;
+        this.printers.set(id, {
+          id,
+          name,
+          type: 'usb',
+          vendorId: desc.idVendor,
+          productId: desc.idProduct,
+          status: 'ready'
+        });
+      });
+      logger.info(`${usbDevices.length} impressora(s) USB detectadas.`);
+    } catch (error) {
+      logger.error('Erro ao descobrir impressoras USB:', error);
+    }
+    // Rede e Bluetooth podem ser adicionadas manualmente
+    // Exemplo de impressora de rede (pode ser detectada via scanner ou adicionada manualmente)
+    // this.addNetworkPrinter('Elgin TCP', '192.168.0.100', 9100);
+    // this.addBluetoothPrinter('Daruma BT', '00:11:22:33:44:55');
+  }
+  // Atualização automática a cada 10 segundos
+  startAutoDiscovery(interval = 10000) {
+    setInterval(() => {
+      this.discoverPrinters();
+    }, interval);
+  }
+
+  getPrinters() {
+    return Array.from(this.printers.values());
+  }
+
+  addNetworkPrinter(name, address, port = 9100) {
+    const id = `network-${Date.now()}`;
+    this.printers.set(id, {
+      id,
+      name,
+      type: 'network',
+      address,
+      port,
+      status: 'ready'
+    });
+    logger.info(`Impressora de rede adicionada: ${name} (${address}:${port})`);
+    return id;
+  }
+
+  addBluetoothPrinter(name, address) {
+    const id = `bluetooth-${Date.now()}`;
+    this.printers.set(id, {
+      id,
+      name,
+      type: 'bluetooth',
+      address,
+      status: 'ready'
+    });
+    logger.info(`Impressora Bluetooth adicionada: ${name} (${address})`);
+    return id;
+  }
+
+  removePrinter(printerId) {
+    const removed = this.printers.delete(printerId);
+    if (removed) {
+      logger.info(`Impressora removida: ${printerId}`);
+    }
+    return removed;
+  }
+
+  async testPrint(printerId) {
+    const printer = this.printers.get(printerId);
+    if (!printer) throw new Error('Impressora não encontrada');
+    let device;
+    if (printer.type === 'usb') {
+      // Abre sempre o primeiro dispositivo USB encontrado
+      try {
+        const usbDevices = escpos.USB.findPrinter();
+        if (!usbDevices.length) throw new Error('Nenhuma impressora USB encontrada');
+        device = new escpos.USB(usbDevices[0]);
+      } catch (e) {
+        throw new Error('Falha ao abrir dispositivo USB: ' + e.message);
+      }
+    } else if (printer.type === 'network') {
+      device = new Network(printer.address, printer.port);
+    } else if (printer.type === 'bluetooth') {
+      device = new Bluetooth(printer.address);
+    }
+    return new Promise((resolve, reject) => {
+      device.open((err) => {
+        if (err) return reject(err);
+        const printerObj = new escpos.Printer(device);
+        printerObj
+          .align('CT')
+          .style('B')
+          .size(2,2)
+          .text('Teste de Impressão')
+          .text('-------------------')
+          .text('Data: ' + new Date().toLocaleString())
+          .cut()
+          .close(resolve);
+      });
+    });
+  }
+}
+
+module.exports = PrinterManager;
+
+
+
+  // Método para imprimir pedidos
+  async print(printerId, orderData, printType = 'counter') {
+    const printer = this.printers.get(printerId);
+    if (!printer) throw new Error('Impressora não encontrada');
+    
+    const { generateOrderPrintData } = require('./escpos-formatter');
+    const rawCommands = generateOrderPrintData(orderData, printType);
+    const commandString = rawCommands.join('');
+    
+    let device;
+    if (printer.type === 'usb') {
+      const usbDevices = escpos.USB.findPrinter();
+      if (!usbDevices.length) throw new Error('Nenhuma impressora USB encontrada');
+      device = new escpos.USB(usbDevices[0]);
+    } else if (printer.type === 'network') {
+      device = new escpos.Network(printer.address, printer.port);
+    }
+    
+    return new Promise((resolve, reject) => {
+      device.open((err) => {
+        if (err) return reject(err);
+        const printerObj = new escpos.Printer(device);
+        printerObj.raw(Buffer.from(commandString, 'binary')).close(resolve);
+      });
+    });
+  }

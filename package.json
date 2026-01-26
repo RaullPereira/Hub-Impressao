@@ -1,0 +1,47 @@
+{
+  "name": "thermal-print-service",
+  "version": "1.0.0",
+  "description": "Serviço de impressão térmica em background",
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build": "electron-builder"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "electron-store": "^8.1.0",
+    "escpos": "^3.0.0-alpha.6",
+    "escpos-network": "^3.0.0-alpha.5",
+    "escpos-usb": "^3.0.0-alpha.4",
+    "express": "^4.18.2",
+    "https": "^1.0.0",
+    "selfsigned": "^5.5.0",
+    "uuid": "^9.0.1",
+    "winston": "^3.19.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.seuprojeto.hubimpressao",
+    "productName": "Hub Impressao",
+    "files": [
+      "build/**/*",
+      "src/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "icon": "assets/icons/app.icns",
+      "target": "dmg"
+    },
+    "win": {
+      "icon": "assets/icons/app.ico",
+      "target": "nsis"
+    }
+  }
+}

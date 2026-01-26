@@ -18,6 +18,11 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install system deps (macOS)
+        run: |
+          brew update || true
+          brew install libusb || true
+
       - name: Install dependencies
         run: npm ci
 
@@ -25,7 +30,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          npx electron-builder --mac --publish=always
+          set -o pipefail
+          npx electron-builder --mac --publish=never 2>&1 | tee build-mac.log
+
+      - name: Upload mac build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-mac-log
+          path: build-mac.log
 
   build-win:
     name: Build Windows (nsis)
@@ -39,6 +52,11 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install system deps (Windows)
+        shell: powershell
+        run: |
+          choco install libusb -y || Write-Host 'choco install failed or already installed'
+
       - name: Install dependencies
         run: npm ci
 
@@ -46,7 +64,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          npx electron-builder --win --publish=always
+          set -o pipefail
+          npx electron-builder --win --publish=never 2>&1 | tee build-win.log
+
+      - name: Upload win build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-win-log
+          path: build-win.log
 
   # Optional: Linux build (AppImage)
   build-linux:
@@ -61,6 +87,11 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install system deps (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev build-essential libudev-dev pkg-config
+
       - name: Install dependencies
         run: npm ci
 
@@ -68,7 +99,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          npx electron-builder --linux --publish=always
+          set -o pipefail
+          npx electron-builder --linux --publish=never 2>&1 | tee build-linux.log
+
+      - name: Upload linux build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-log
+          path: build-linux.log
 
   publish-npm:
     name: Publish npm package to GitHub Packages

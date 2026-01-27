@@ -68,6 +68,7 @@ function displayPrinters(printers) {
       <div class="printer-info">
         <div class="printer-name">
           ${printer.name}
+          ${printer.windowsMapping ? `<span class="printer-queue">(mapeado: ${printer.windowsMapping})</span>` : ''}
           ${printer.queueName && printer.queueName !== printer.name ? `<span class="printer-queue">(${printer.queueName})</span>` : ''}
           ${printer.isDefault ? '<span class="badge">Padrão Sistema</span>' : ''}
         </div>
@@ -77,9 +78,71 @@ function displayPrinters(printers) {
         <button class="btn btn-small btn-success" onclick="testPrinterById('${printer.id}')">
           🧪 Testar
         </button>
+        <button class="btn btn-small btn-primary" onclick="openMapDialog('${printer.id}')">
+          🔗 Mapear
+        </button>
       </div>
     </div>
   `).join('');
+}
+
+// Mapping modal
+async function openMapDialog(printerId) {
+  try {
+    // Buscar impressoras do Windows
+    const res = await fetch(`${API_URL}/windows-printers`);
+    const data = await res.json();
+    if (!data.success) {
+      showMessage('Erro ao obter filas do Windows', 'error');
+      return;
+    }
+    const printers = data.printers || [];
+
+    // Criar modal simples
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal">
+        <h3>Mapear impressora</h3>
+        <p>Selecione a fila do Windows para mapear esta impressora USB:</p>
+        <select id="_map_select" class="printer-select">
+          ${printers.map(p => `<option value="${p}">${p}</option>`).join('')}
+        </select>
+        <div style="margin-top:12px; text-align:right;">
+          <button id="_map_cancel" class="btn">Cancelar</button>
+          <button id="_map_save" class="btn btn-primary">Salvar</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    document.getElementById('_map_cancel').addEventListener('click', () => { document.body.removeChild(modal); });
+    document.getElementById('_map_save').addEventListener('click', async () => {
+      const select = document.getElementById('_map_select');
+      const target = select.value;
+      try {
+        const r = await fetch(`${API_URL}/printers/${encodeURIComponent(printerId)}/map`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ windowsPrinter: target })
+        });
+        const jr = await r.json();
+        if (jr.success) {
+          showMessage('Mapeamento salvo', 'success');
+          document.body.removeChild(modal);
+          loadPrinters();
+        } else {
+          showMessage('Falha ao salvar mapeamento', 'error');
+        }
+      } catch (e) {
+        console.error(e);
+        showMessage('Erro ao salvar mapeamento', 'error');
+      }
+    });
+  } catch (e) {
+    console.error('Erro ao abrir diálogo de mapeamento:', e);
+    showMessage('Erro ao abrir diálogo de mapeamento', 'error');
+  }
 }
 
 function populateTestPrinter(printers) {

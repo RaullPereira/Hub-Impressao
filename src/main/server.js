@@ -28,7 +28,13 @@ class Server {
     this.app.get('/api/printers', (req, res) => {
       try {
         const printers = this.printerManager.getPrinters();
-        res.json({ success: true, printers });
+        // Anexa mapeamento Windows (se existir) para cada impressora USB
+        const Settings = require('./config/settings');
+        const enriched = printers.map(p => {
+          const mapping = Settings.getUsbMapping(p.id);
+          return Object.assign({}, p, { windowsMapping: mapping || null });
+        });
+        res.json({ success: true, printers: enriched });
       } catch (error) {
         logger.error('Erro ao listar impressoras:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -43,6 +49,69 @@ class Server {
         res.json({ success: true, message: 'Teste enviado!' });
       } catch (error) {
         logger.error('Erro ao testar impressora:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Listar impressoras do Windows (para mapeamento)
+    this.app.get('/api/windows-printers', async (req, res) => {
+      try {
+        const winSpool = require('./printer/win-spool');
+        const printers = await winSpool.listPrinters();
+        res.json({ success: true, printers });
+      } catch (error) {
+        logger.error('Erro ao listar impressoras do Windows:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Sugestões de mapeamento: correlaciona dispositivos USB detectados com PnP da máquina
+    this.app.get('/api/printers/suggestions', async (req, res) => {
+      try {
+        const winSpool = require('./printer/win-spool');
+        const pnp = await winSpool.listPnpDevices();
+        const printers = this.printerManager.getPrinters();
+        const usbPrinters = printers.filter(p => p.type === 'usb');
+        const suggestions = usbPrinters.map(up => {
+          const vid = up.vendorId ? up.vendorId.toString(16).padStart(4, '0').toUpperCase() : null;
+          const pid = up.productId ? up.productId.toString(16).padStart(4, '0').toUpperCase() : null;
+          const search = vid && pid ? `VID_${vid}&PID_${pid}` : null;
+          const matches = [];
+          if (search) {
+            for (const d of pnp) {
+              try {
+                const iid = (d.InstanceId || d.instanceId || '').toUpperCase();
+                const fname = (d.FriendlyName || d.friendlyName || '').toString();
+                if (iid.includes(search)) matches.push({ instanceId: iid, friendlyName: fname });
+              } catch (e) {}
+            }
+          }
+          return {
+            usbId: up.id,
+            vendorId: up.vendorId,
+            productId: up.productId,
+            vidPidSearch: search,
+            matches
+          };
+        });
+        res.json({ success: true, suggestions });
+      } catch (error) {
+        logger.error('Erro ao gerar sugestões de mapeamento:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Mapear impressora USB detectada para uma fila do Windows
+    this.app.post('/api/printers/:id/map', (req, res) => {
+      try {
+        const usbId = req.params.id;
+        const { windowsPrinter } = req.body;
+        if (!windowsPrinter) return res.status(400).json({ success: false, error: 'windowsPrinter é obrigatório' });
+        Settings.setUsbMapping(usbId, windowsPrinter);
+        logger.info(`Mapeamento salvo: ${usbId} -> ${windowsPrinter}`);
+        res.json({ success: true });
+      } catch (error) {
+        logger.error('Erro ao salvar mapeamento:', error);
         res.status(500).json({ success: false, error: error.message });
       }
     });

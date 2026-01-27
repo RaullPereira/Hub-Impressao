@@ -16,6 +16,8 @@ class Settings {
             counter: null,
             delivery: null
           }
+          ,
+          usbMappings: {}
         };
       }
       const data = fs.readFileSync(SETTINGS_FILE, 'utf-8');
@@ -50,6 +52,18 @@ class Settings {
     const settings = this.getAll();
     if (!settings.printers) settings.printers = {};
     settings.printers[type] = printerId;
+    return this.save(settings);
+  }
+
+  static getUsbMapping(usbId) {
+    const settings = this.getAll();
+    return settings.usbMappings?.[usbId] || null;
+  }
+
+  static setUsbMapping(usbId, windowsPrinterName) {
+    const settings = this.getAll();
+    if (!settings.usbMappings) settings.usbMappings = {};
+    settings.usbMappings[usbId] = windowsPrinterName;
     return this.save(settings);
   }
 }

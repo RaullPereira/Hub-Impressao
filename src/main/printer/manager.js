@@ -7,6 +7,8 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const winSpool = require('./win-spool');
+const Settings = require('../config/settings');
 
 class PrinterManager extends EventEmitter {
   constructor() {
@@ -15,7 +17,7 @@ class PrinterManager extends EventEmitter {
     this.discoverPrinters();
   }
 
-  discoverPrinters() {
+  async discoverPrinters() {
     try {
       this.printers.clear();
       // Listar impressoras USB
@@ -35,6 +37,71 @@ class PrinterManager extends EventEmitter {
         });
       });
       logger.info(`${usbDevices.length} impressora(s) USB detectadas`);
+
+      // On Windows, try to match USB devices to installed Windows printer queues (automatic mapping)
+      if (os.platform() === 'win32') {
+        try {
+          const pnp = await winSpool.listPnpDevices();
+          const winPrinters = await winSpool.listPrinters();
+          // For ease, lowercase copies
+          const winPrintersLower = winPrinters.map(p => p.toLowerCase());
+
+          for (const [id, p] of this.printers) {
+            if (p.type !== 'usb') continue;
+            const vid = p.vendorId ? p.vendorId.toString(16).padStart(4, '0').toUpperCase() : null;
+            const pid = p.productId ? p.productId.toString(16).padStart(4, '0').toUpperCase() : null;
+            if (!vid || !pid) continue;
+            const search = `VID_${vid}&PID_${pid}`.toUpperCase();
+            // find PnP matches
+            const matches = (pnp || []).filter(d => {
+              const iid = (d.InstanceId || d.instanceId || '').toString().toUpperCase();
+              return iid.includes(search);
+            });
+            if (matches.length === 0) continue;
+            // Try to find a Windows printer name that contains the FriendlyName or model
+            let chosenPrinter = null;
+            for (const m of matches) {
+              const friendly = (m.FriendlyName || m.friendlyName || '').toString().trim();
+              if (!friendly) continue;
+              const fl = friendly.toLowerCase();
+              // Prefer exact contains
+              for (let i = 0; i < winPrintersLower.length; i++) {
+                if (winPrintersLower[i].includes(fl) || fl.includes(winPrintersLower[i])) {
+                  chosenPrinter = winPrinters[i];
+                  break;
+                }
+              }
+              if (chosenPrinter) break;
+              // fallback: match by tokens
+              const tokens = fl.split(/\s+/).filter(Boolean);
+              for (let i = 0; i < winPrintersLower.length; i++) {
+                for (const t of tokens) {
+                  if (t.length < 3) continue;
+                  if (winPrintersLower[i].includes(t)) {
+                    chosenPrinter = winPrinters[i];
+                    break;
+                  }
+                }
+                if (chosenPrinter) break;
+              }
+              if (chosenPrinter) break;
+            }
+            if (chosenPrinter) {
+              // Update the printer entry to show Windows queue name
+              const friendlyName = matches[0].FriendlyName || matches[0].friendlyName || null;
+              this.printers.set(id, Object.assign({}, p, {
+                name: friendlyName || chosenPrinter,
+                queueName: chosenPrinter,
+                type: 'usb',
+                status: 'ready'
+              }));
+              logger.info(`Auto-mapped USB printer ${id} -> Windows queue: ${chosenPrinter}`);
+            }
+          }
+        } catch (e) {
+          logger.warn('Auto-mapping USB->Windows printers falhou:', e.message || e);
+        }
+      }
 
       // Listar impressoras do sistema (CUPS) - todas, inclusive pausadas
       let cupsPrinters = [];
@@ -161,33 +228,86 @@ class PrinterManager extends EventEmitter {
     }
 
     return new Promise((resolve, reject) => {
-      device.open((err) => {
-        if (err) {
-          logger.error('Erro ao abrir impressora:', err);
-          return reject(new Error('Erro ao abrir impressora: ' + err.message));
-        }
+      try {
+        device.open((err) => {
+          if (err) {
+            logger.error('Erro ao abrir impressora:', err);
+            // Fallback: tentar enviar via spooler do Windows se estiver no Windows
+            if (os.platform() === 'win32') {
+              (async () => {
+                try {
+                          const mapping = Settings.getUsbMapping(printer.id);
+                          const defaultPrinter = mapping || (await winSpool.getDefaultPrinter()) || (await winSpool.getPreferredPrinter()) || (await winSpool.listPrinters())[0];
+                          if (!defaultPrinter) throw new Error('Nenhuma impressora do Windows encontrada para fallback');
+                          const content = `TESTE DE IMPRESSAO\r\nSistema Funcionando!\r\n${new Date().toLocaleString('pt-BR')}`;
+                          // Preferir envio RAW via WinAPI para manter bytes ESC/POS
+                          try {
+                            await winSpool.printRaw(defaultPrinter, Buffer.from(content, 'utf8'));
+                            logger.info('[TEST-FALLBACK] Impressão via spooler RAW enviada com sucesso para: ' + defaultPrinter);
+                          } catch (e) {
+                            // fallback para printFile se RAW falhar
+                            const tmpFile = path.join(os.tmpdir(), `hubimpressao_test_${Date.now()}.txt`);
+                            fs.writeFileSync(tmpFile, content, { encoding: 'utf8' });
+                            await winSpool.printFile(defaultPrinter, tmpFile);
+                            try { fs.unlinkSync(tmpFile); } catch (e) {}
+                            logger.info('[TEST-FALLBACK] Impressão via spooler (print) enviada com sucesso para: ' + defaultPrinter);
+                          }
+                  resolve();
+                } catch (e) {
+                  logger.error('[TEST-FALLBACK] Falha no fallback para spooler Windows:', e);
+                  return reject(new Error('Erro ao abrir impressora: ' + err.message));
+                }
+              })();
+              return;
+            }
+            return reject(new Error('Erro ao abrir impressora: ' + err.message));
+          }
 
-        const printerObj = new escpos.Printer(device, {
-          encoding: 'GB18030'
-        });
-
-        printerObj
-          .font('a')
-          .align('ct')
-          .style('bu')
-          .size(2, 2)
-          .text('TESTE DE IMPRESSAO')
-          .size(1, 1)
-          .text('------------------')
-          .text('Sistema Funcionando!')
-          .text(new Date().toLocaleString('pt-BR'))
-          .feed(3)
-          .cut()
-          .close(() => {
-            logger.info('Teste de impressão concluído');
-            resolve();
+          const printerObj = new escpos.Printer(device, {
+            encoding: 'GB18030'
           });
-      });
+
+          printerObj
+            .font('a')
+            .align('ct')
+            .style('bu')
+            .size(2, 2)
+            .text('TESTE DE IMPRESSAO')
+            .size(1, 1)
+            .text('------------------')
+            .text('Sistema Funcionando!')
+            .text(new Date().toLocaleString('pt-BR'))
+            .feed(3)
+            .cut()
+            .close(() => {
+              logger.info('Teste de impressão concluído');
+              resolve();
+            });
+        });
+      } catch (syncErr) {
+        logger.error('Erro síncrono ao abrir device:', syncErr);
+        if (os.platform() === 'win32') {
+          (async () => {
+            try {
+              const mapping = Settings.getUsbMapping(printer.id);
+              const defaultPrinter = mapping || (await winSpool.getDefaultPrinter()) || (await winSpool.getPreferredPrinter()) || (await winSpool.listPrinters())[0];
+              if (!defaultPrinter) throw new Error('Nenhuma impressora do Windows encontrada para fallback');
+              const tmpFile = path.join(os.tmpdir(), `hubimpressao_test_${Date.now()}.txt`);
+              const content = `TESTE DE IMPRESSAO\r\nSistema Funcionando!\r\n${new Date().toLocaleString('pt-BR')}`;
+              fs.writeFileSync(tmpFile, content, { encoding: 'utf8' });
+              await winSpool.printFile(defaultPrinter, tmpFile);
+              try { fs.unlinkSync(tmpFile); } catch (e) {}
+              logger.info('[TEST-FALLBACK] Impressão via spooler do Windows enviada com sucesso para: ' + defaultPrinter);
+              resolve();
+            } catch (e) {
+              logger.error('[TEST-FALLBACK] Falha no fallback síncrono para spooler Windows:', e);
+              return reject(syncErr);
+            }
+          })();
+        } else {
+          return reject(syncErr);
+        }
+      }
     });
   }
 
@@ -274,6 +394,33 @@ class PrinterManager extends EventEmitter {
       device.open((err) => {
         if (err) {
           logger.error('[PRINT] Erro ao abrir impressora:', err);
+          // Tentar fallback via spooler do Windows
+          if (os.platform() === 'win32') {
+            (async () => {
+              try {
+                    const mapping = Settings.getUsbMapping(printer.id);
+                    const defaultPrinter = mapping || (await winSpool.getDefaultPrinter()) || (await winSpool.getPreferredPrinter()) || (await winSpool.listPrinters())[0];
+                    if (!defaultPrinter) throw new Error('Nenhuma impressora do Windows encontrada para fallback');
+                    // Enviar RAW (recomendado para ESC/POS)
+                    try {
+                      await winSpool.printRaw(defaultPrinter, printBuffer);
+                      logger.info('[PRINT-FALLBACK] Impressão RAW via spooler do Windows enviada com sucesso para: ' + defaultPrinter);
+                    } catch (e) {
+                      // fallback para printFile se RAW falhar
+                      const tmpFile = path.join(os.tmpdir(), `hubimpressao_print_${Date.now()}.bin`);
+                      fs.writeFileSync(tmpFile, printBuffer);
+                      await winSpool.printFile(defaultPrinter, tmpFile);
+                      try { fs.unlinkSync(tmpFile); } catch (e) {}
+                      logger.info('[PRINT-FALLBACK] Impressão via spooler (print) enviada com sucesso para: ' + defaultPrinter);
+                    }
+                resolve();
+              } catch (e) {
+                logger.error('[PRINT-FALLBACK] Falha no fallback para spooler Windows:', e);
+                return reject(new Error('Erro ao abrir impressora: ' + err.message));
+              }
+            })();
+            return;
+          }
           return reject(new Error('Erro ao abrir impressora: ' + err.message));
         }
 

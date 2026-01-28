@@ -10,6 +10,9 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
+    "install:mac": "npm install --no-optional",
+    "install:win": "npm install",
+    "postinstall": "node scripts/postinstall.js",
     "build:mac": "electron-builder --mac",
     "build:win": "electron-builder --win",
     "build": "electron-builder"
@@ -27,6 +30,9 @@
     "winston": "^3.19.0",
     "ws": "^8.19.0"
   },
+  "optionalDependencies": {
+    "printer": "^0.4.0"
+  },
   "devDependencies": {
     "electron": "^28.0.0",
     "electron-builder": "^24.13.3"
@@ -41,7 +47,7 @@
     ],
     "mac": {
       "icon": "assets/icons/app.icns",
-      "target": "dmg"
+      "target": ["zip", "pkg"]
     },
     "win": {
       "icon": "assets/icons/app.ico",

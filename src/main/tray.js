@@ -13,20 +13,30 @@ class TrayManager {
 
   createTray() {
     // Resolve o caminho do ícone dependendo se o app está empacotado.
-    // Quando empacotado, os assets ficam em process.resourcesPath.
     let iconPath;
     if (app.isPackaged) {
       const icnsPath = path.join(process.resourcesPath, 'assets', 'icons', 'app.icns');
       const icoPath = path.join(process.resourcesPath, 'assets', 'icons', 'app.ico');
       const svgPath = path.join(process.resourcesPath, 'assets', 'icons', 'printer-svgrepo-com.svg');
-      if (fs.existsSync(icnsPath)) iconPath = icnsPath;
+      if (fs.existsSync(icnsPath)) iconPath = icnsPath; // Prefer .icns on Mac if available
+      else if (fs.existsSync(svgPath)) iconPath = svgPath;
       else if (fs.existsSync(icoPath)) iconPath = icoPath;
       else iconPath = svgPath;
     } else {
       iconPath = path.join(__dirname, '../../assets/icons/printer-svgrepo-com.svg');
     }
 
-    const trayIcon = nativeImage.createFromPath(iconPath);
+    let trayIcon = nativeImage.createFromPath(iconPath);
+
+    // Resize for macOS menu bar (standard is usually 16x16 or 22x22)
+    // If it's too big, it might not show or look weird
+    if (process.platform === 'darwin') {
+      trayIcon = trayIcon.resize({ width: 22, height: 22 });
+      trayIcon.setTemplateImage(true); // Allows macOS to color it white/black automatically
+    } else {
+      trayIcon = trayIcon.resize({ width: 32, height: 32 });
+    }
+
     this.tray = new Tray(trayIcon);
     this.tray.setToolTip('Hub Impressao');
     this.tray.setContextMenu(this.buildMenu());

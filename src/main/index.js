@@ -2,7 +2,12 @@ const { app, BrowserWindow, ipcMain, Menu } = require('electron');
 const path = require('path');
 const TrayManager = require('./tray');
 const Server = require('./server');
-const PrinterManager = require('./printer/cups-manager'); // MUDOU AQUI
+let PrinterManager;
+if (process.platform === 'win32') {
+  PrinterManager = require('./printer/windows-manager');
+} else {
+  PrinterManager = require('./printer/cups-manager');
+}
 const SecureWebSocketServer = require('./websocket/secure-server');
 const logger = require('./utils/logger');
 

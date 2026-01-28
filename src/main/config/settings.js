@@ -15,7 +15,11 @@ class Settings {
             kitchen: null,
             counter: null,
             delivery: null
-          }
+          },
+          // printChannel: 'local' | 'qz' — controls whether to use local printing or forward to QZ Tray
+          printChannel: 'local',
+          // Optional QZ endpoint to forward print requests when printChannel === 'qz'
+          qzEndpoint: null
         };
       }
       const data = fs.readFileSync(SETTINGS_FILE, 'utf-8');

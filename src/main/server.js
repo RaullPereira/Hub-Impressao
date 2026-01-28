@@ -17,6 +17,12 @@ class Server {
   setupMiddleware() {
     this.app.use(cors());
     this.app.use(express.json());
+
+    // Log all requests
+    this.app.use((req, res, next) => {
+      logger.info(`[HTTP] ${req.method} ${req.url} - IP: ${req.ip}`);
+      next();
+    });
   }
 
   setupRoutes() {
@@ -51,17 +57,63 @@ class Server {
     this.app.post('/api/print', async (req, res) => {
       try {
         logger.info('=== RECEBENDO PEDIDO DE IMPRESSÃO ===');
-        
+
         const { printerId, orderData, printType } = req.body;
-        
+
         logger.info(`printerId: ${printerId}`);
         logger.info(`printType: ${printType}`);
-        
+
         await this.printerManager.print(printerId, orderData, printType);
-        
+
         res.json({ success: true, message: 'Pedido impresso!' });
       } catch (error) {
         logger.error('Erro ao imprimir:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Dispatch de impressão (respeita configuração printChannel)
+    this.app.post('/api/print/dispatch', async (req, res) => {
+      try {
+        const { printerId, orderData, printType } = req.body;
+        const settings = Settings.getAll();
+
+        logger.info(`Dispatch print - channel=${settings.printChannel}`);
+
+        if (!settings.printChannel || settings.printChannel === 'local') {
+          // Imprime localmente
+          await this.printerManager.print(printerId, orderData, printType);
+          return res.json({ success: true, message: 'Impressão local enviada' });
+        }
+
+        if (settings.printChannel === 'qz') {
+          if (!settings.qzEndpoint) {
+            return res.status(400).json({ success: false, error: 'qzEndpoint não configurado' });
+          }
+
+          // Forward to QZ Tray / external endpoint
+          try {
+            const response = await fetch(settings.qzEndpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ printerId, orderData, printType })
+            });
+
+            const body = await response.json().catch(() => null);
+            if (!response.ok) {
+              throw new Error(body?.error || `Falha ao encaminhar para QZ (${response.status})`);
+            }
+
+            return res.json({ success: true, message: 'Encaminhado para QZ', response: body });
+          } catch (err) {
+            logger.error('Erro ao encaminhar para QZ:', err);
+            return res.status(500).json({ success: false, error: err.message });
+          }
+        }
+
+        return res.status(400).json({ success: false, error: 'printChannel inválido' });
+      } catch (error) {
+        logger.error('Erro no dispatch de impressão:', error);
         res.status(500).json({ success: false, error: error.message });
       }
     });
@@ -77,15 +129,36 @@ class Server {
       }
     });
 
+    // Atualizar configurações (patch parcial)
+    this.app.post('/api/settings', (req, res) => {
+      try {
+        const incoming = req.body || {};
+        const current = Settings.getAll();
+
+        const merged = Object.assign({}, current, incoming);
+        // Merge printers separately to avoid overwriting unintentionally
+        if (incoming.printers) {
+          merged.printers = Object.assign({}, current.printers || {}, incoming.printers);
+        }
+
+        const ok = Settings.save(merged);
+        if (ok) return res.json({ success: true, settings: merged });
+        return res.status(500).json({ success: false, error: 'Falha ao salvar configurações' });
+      } catch (error) {
+        logger.error('Erro ao salvar configurações:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
     // Salvar configuração de impressora
     this.app.post('/api/settings/printer', (req, res) => {
       try {
         const { type, printerId } = req.body;
-        
+
         if (!type) {
           return res.status(400).json({ success: false, error: 'Tipo obrigatório (default, kitchen, counter, delivery)' });
         }
-        
+
         Settings.setPrinterForType(type, printerId);
         logger.info(`Impressora configurada: ${type} -> ${printerId}`);
         res.json({ success: true, message: 'Configuração salva' });
@@ -110,11 +183,11 @@ class Server {
   setupWebSocket() {
     this.wss.on('connection', (ws) => {
       logger.info('Nova conexão WebSocket');
-      
+
       ws.on('message', async (message) => {
         try {
           const data = JSON.parse(message.toString());
-          
+
           if (data.type === 'PRINT_ORDER') {
             await this.printerManager.print(data.printerId, data.orderData, data.printType);
             ws.send(JSON.stringify({ type: 'SUCCESS', message: 'Pedido impresso!' }));
@@ -133,7 +206,7 @@ class Server {
     this.server = http.createServer(this.app);
     this.wss = new WebSocket.Server({ server: this.server });
     this.setupWebSocket();
-    
+
     this.server.listen(this.port, () => {
       logger.info(`Servidor rodando na porta ${this.port}`);
       logger.info(`REST API: http://localhost:${this.port}/api`);

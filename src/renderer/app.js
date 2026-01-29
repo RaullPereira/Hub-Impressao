@@ -1,226 +1,220 @@
-const API_URL = 'http://localhost:3001/api';
+const API_URL = 'http://127.0.0.1:3001/api';
 
 let allPrinters = [];
 
-// Funções auxiliares
-function showMessage(message, type = 'info') {
-  const statusEl = document.getElementById('settings-status');
-  if (statusEl) {
-    statusEl.textContent = message;
-    statusEl.className = `status-message ${type}`;
-    setTimeout(() => {
-      statusEl.textContent = '';
-      statusEl.className = 'status-message';
-    }, 3000);
-  }
-  addLog(message);
+// --- UI Helpers ---
+
+function showStatus(message, type = 'info') {
+    const statusEl = document.getElementById('settings-status');
+    if (statusEl) {
+        statusEl.textContent = message;
+        statusEl.className = `status-message ${type}`;
+        // Auto-clear success messages after 3s
+        if (type === 'success') {
+            setTimeout(() => {
+                statusEl.textContent = '';
+                statusEl.className = 'status-message';
+            }, 3000);
+        }
+    }
+    addLog(message, type);
 }
 
-function addLog(message) {
-  const logs = document.getElementById('logs');
-  if (!logs) return;
-  
-  const entry = document.createElement('p');
-  entry.className = 'log-entry';
-  entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-  logs.insertBefore(entry, logs.firstChild);
-  
-  while (logs.children.length > 50) {
-    logs.removeChild(logs.lastChild);
-  }
+function addLog(message, type = 'info') {
+    const logsContainer = document.getElementById('dashboard-logs');
+    const fullLogsContainer = document.getElementById('full-logs');
+    const time = new Date().toLocaleTimeString();
+
+    const logHTML = `
+    <div class="log-item ${type}">
+      <span class="time">[${time}]</span>
+      <span class="message">${message}</span>
+    </div>
+  `;
+
+    if (logsContainer) {
+        // Remove empty state if present
+        const emptyState = logsContainer.querySelector('.empty-state');
+        if (emptyState) emptyState.remove();
+
+        logsContainer.insertAdjacentHTML('afterbegin', logHTML);
+        // Keep only last 10 logs on dashboard
+        if (logsContainer.children.length > 10) logsContainer.lastElementChild.remove();
+    }
+
+    if (fullLogsContainer) {
+        fullLogsContainer.insertAdjacentHTML('beforeend', logHTML);
+        fullLogsContainer.scrollTop = fullLogsContainer.scrollHeight;
+    }
 }
 
-// Carregar impressoras
+// --- Printer Management ---
+
 async function loadPrinters() {
-  try {
-    const res = await fetch(`${API_URL}/printers`);
-    const data = await res.json();
-    
-      if (data.success) {
-        allPrinters = data.printers;
-        updatePrinterCount(allPrinters.length);
-        displayPrinters(allPrinters);
-        populateTestPrinter(allPrinters);
-        addLog(`${allPrinters.length} impressora(s) carregada(s)`);
-      }
-  } catch (error) {
-    console.error('Erro ao carregar impressoras:', error);
-    showMessage('Erro ao carregar impressoras', 'error');
-  }
+    const list = document.getElementById('printer-list');
+    if (list) list.innerHTML = `
+    <div class="loading-state">
+      <div class="spinner"></div>
+      <p>Atualizando impressoras...</p>
+    </div>
+  `;
+
+    try {
+        const res = await fetch(`${API_URL}/printers`);
+
+        // Check for HTTP errors
+        if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`Servidor respondeu com ${res.status}: ${text.substring(0, 100)}...`);
+        }
+
+        const data = await res.json();
+
+        if (data.success) {
+            allPrinters = data.printers;
+            updatePrinterCount(allPrinters.length);
+            renderPrinters(allPrinters);
+            populateTestSelect(allPrinters);
+            addLog(`${allPrinters.length} impressora(s) detectada(s)`, 'success');
+        } else {
+            throw new Error('Falha na resposta da API');
+        }
+    } catch (error) {
+        console.error('Erro ao carregar impressoras:', error);
+        showStatus(`Erro: ${error.message}`, 'error');
+        if (list) list.innerHTML = `<div class="empty-state">Erro: ${error.message}</div>`;
+    }
 }
 
 function updatePrinterCount(count) {
-  const el = document.getElementById('printer-count');
-  if (el) el.textContent = count;
+    const el = document.getElementById('printer-count');
+    if (el) {
+        el.textContent = count;
+        // Animate the number change
+        el.classList.add('updated');
+        setTimeout(() => el.classList.remove('updated'), 300);
+    }
 }
 
-function displayPrinters(printers) {
-  const list = document.getElementById('printer-list');
-  if (!list) return;
-  
-  if (printers.length === 0) {
-    list.innerHTML = '<p class="empty">Nenhuma impressora encontrada</p>';
-    return;
-  }
-  
-  list.innerHTML = printers.map(printer => `
-    <div class="printer-item">
+function renderPrinters(printers) {
+    const list = document.getElementById('printer-list');
+    if (!list) return;
+
+    if (printers.length === 0) {
+        list.innerHTML = '<div class="empty-state">Nenhuma impressora encontrada</div>';
+        return;
+    }
+
+    list.innerHTML = printers.map(p => `
+    <div class="printer-card">
+      <div class="printer-icon">🖨️</div>
       <div class="printer-info">
-        <div class="printer-name">
-          ${printer.name}
-          ${printer.windowsMapping ? `<span class="printer-queue">(mapeado: ${printer.windowsMapping})</span>` : ''}
-          ${printer.queueName && printer.queueName !== printer.name ? `<span class="printer-queue">(${printer.queueName})</span>` : ''}
-          ${printer.isDefault ? '<span class="badge">Padrão Sistema</span>' : ''}
+        <div class="printer-name">${p.name}</div>
+        <div class="printer-meta">
+          <span class="printer-type">${p.type || 'RAW'}</span>
+          ${p.isDefault ? '<span class="badge">Padrão</span>' : ''}
         </div>
-        <div class="printer-type">${printer.type}</div>
       </div>
-      <div class="printer-actions">
-        <button class="btn btn-small btn-success" onclick="testPrinterById('${printer.id}')">
+      <div class="printer-actions" style="margin-top: 1rem;">
+        <button class="btn-secondary" style="width: 100%; justify-content: center;" onclick="testPrinterById('${p.id.replace(/'/g, "\\'")}')">
           🧪 Testar
-        </button>
-        <button class="btn btn-small btn-primary" onclick="openMapDialog('${printer.id}')">
-          🔗 Mapear
         </button>
       </div>
     </div>
   `).join('');
 }
 
-// Mapping modal
-async function openMapDialog(printerId) {
-  try {
-    // Buscar impressoras do Windows
-    const res = await fetch(`${API_URL}/windows-printers`);
-    const data = await res.json();
-    if (!data.success) {
-      showMessage('Erro ao obter filas do Windows', 'error');
-      return;
-    }
-    const printers = data.printers || [];
+function populateTestSelect(printers) {
+    const select = document.getElementById('test-printer');
+    if (!select) return;
 
-    // Criar modal simples
-    const modal = document.createElement('div');
-    modal.className = 'modal-overlay';
-    modal.innerHTML = `
-      <div class="modal">
-        <h3>Mapear impressora</h3>
-        <p>Selecione a fila do Windows para mapear esta impressora USB:</p>
-        <select id="_map_select" class="printer-select">
-          ${printers.map(p => `<option value="${p}">${p}</option>`).join('')}
-        </select>
-        <div style="margin-top:12px; text-align:right;">
-          <button id="_map_cancel" class="btn">Cancelar</button>
-          <button id="_map_save" class="btn btn-primary">Salvar</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(modal);
-
-    document.getElementById('_map_cancel').addEventListener('click', () => { document.body.removeChild(modal); });
-    document.getElementById('_map_save').addEventListener('click', async () => {
-      const select = document.getElementById('_map_select');
-      const target = select.value;
-      try {
-        const r = await fetch(`${API_URL}/printers/${encodeURIComponent(printerId)}/map`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ windowsPrinter: target })
-        });
-        const jr = await r.json();
-        if (jr.success) {
-          showMessage('Mapeamento salvo', 'success');
-          document.body.removeChild(modal);
-          loadPrinters();
-        } else {
-          showMessage('Falha ao salvar mapeamento', 'error');
-        }
-      } catch (e) {
-        console.error(e);
-        showMessage('Erro ao salvar mapeamento', 'error');
-      }
-    });
-  } catch (e) {
-    console.error('Erro ao abrir diálogo de mapeamento:', e);
-    showMessage('Erro ao abrir diálogo de mapeamento', 'error');
-  }
+    const options = printers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+    select.innerHTML = '<option value="">Selecione uma impressora...</option>' + options;
 }
 
-function populateTestPrinter(printers) {
-  const select = document.getElementById('test-printer');
-  if (!select) return;
-  const options = printers.map(p => `<option value="${p.id}">${p.name}${p.queueName && p.queueName !== p.name ? ` (${p.queueName})` : ''}</option>`).join('');
-  select.innerHTML = '<option value="">Selecione uma impressora</option>' + options;
-}
+// --- Actions ---
 
-// Note: Settings management removed — configuration should be done in the main order system.
-
-// Testar impressão
 async function testPrint() {
-  const select = document.getElementById('test-printer');
-  const printerId = select.value;
-  
-  if (!printerId) {
-    showMessage('⚠️ Selecione uma impressora', 'warning');
-    return;
-  }
-  
-  await testPrinterById(printerId);
+    const select = document.getElementById('test-printer');
+    const printerId = select.value;
+
+    if (!printerId) {
+        showStatus('Selecione uma impressora para testar', 'warning');
+        return;
+    }
+
+    await testPrinterById(printerId);
 }
 
 async function testPrinterById(printerId) {
-  try {
-    showMessage('Enviando teste...', 'info');
-    
-    const res = await fetch(`${API_URL}/printers/${printerId}/test`, {
-      method: 'POST'
-    });
-    
-    const data = await res.json();
-    
-    if (data.success) {
-      showMessage('✅ Teste enviado para impressora!', 'success');
-    } else {
-      showMessage(`❌ Erro: ${data.error}`, 'error');
+    try {
+        showStatus(`Enviando teste para impressora...`, 'info');
+
+        const res = await fetch(`${API_URL}/printers/${printerId}/test`, {
+            method: 'POST'
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+            showStatus('Teste enviado com sucesso!', 'success');
+        } else {
+            showStatus(`Erro: ${data.error}`, 'error');
+        }
+    } catch (error) {
+        console.error('Erro no teste:', error);
+        showStatus('Erro de comunicação com o servidor', 'error');
     }
-  } catch (error) {
-    console.error('Erro ao testar impressora:', error);
-    showMessage('❌ Erro ao testar impressora', 'error');
-  }
 }
 
-// Tabs
-function setupTabs() {
-  const tabs = document.querySelectorAll('.tab');
-  const contents = document.querySelectorAll('.tab-content');
-  
-  tabs.forEach(tab => {
-    tab.addEventListener('click', () => {
-      const tabName = tab.dataset.tab;
-      
-      tabs.forEach(t => t.classList.remove('active'));
-      contents.forEach(c => c.classList.remove('active'));
-      
-      tab.classList.add('active');
-      const content = document.getElementById(tabName);
-      if (content) content.classList.add('active');
-      
-          if (tabName === 'printers') loadPrinters();
+// --- Navigation ---
+
+function setupNavigation() {
+    const navItems = document.querySelectorAll('.nav-item');
+    const views = document.querySelectorAll('.view');
+
+    navItems.forEach(item => {
+        item.addEventListener('click', () => {
+            const targetId = item.dataset.tab;
+
+            // Update nav state
+            navItems.forEach(nav => nav.classList.remove('active'));
+            item.classList.add('active');
+
+            // Update view state
+            views.forEach(view => view.classList.remove('active'));
+            const targetView = document.getElementById(targetId);
+            if (targetView) targetView.classList.add('active');
+
+            // Refresh data if switching to printers tab
+            if (targetId === 'printers') loadPrinters();
+        });
     });
-  });
 }
 
-// Botões
-function setupButtons() {
-  const refreshBtn = document.getElementById('refresh-printers');
-  if (refreshBtn) {
-    refreshBtn.addEventListener('click', loadPrinters);
-  }
+// --- Initialization ---
+
+async function checkServerStatus() {
+    try {
+        await fetch(API_URL.replace('/api', '')); // Ping root
+        document.querySelector('.status-badge').className = 'status-badge online';
+        document.querySelector('.status-badge').innerHTML = '<span class="pulse"></span> Sistema Online';
+    } catch (e) {
+        document.querySelector('.status-badge').className = 'status-badge offline';
+        document.querySelector('.status-badge').innerHTML = '<span class="dot" style="background:red"></span> Offline';
+        addLog('Servidor desconectado', 'error');
+    }
 }
 
-// Inicialização
 window.addEventListener('DOMContentLoaded', () => {
-  setupTabs();
-  setupButtons();
-  loadPrinters();
-  addLog('Sistema iniciado');
+    setupNavigation();
+
+    document.getElementById('refresh-printers')?.addEventListener('click', loadPrinters);
+
+    // Initial load
+    loadPrinters();
+    checkServerStatus();
+
+    // Polling for status check (every 30s)
+    setInterval(checkServerStatus, 30000);
 });

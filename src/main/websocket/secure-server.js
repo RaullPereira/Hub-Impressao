@@ -22,8 +22,12 @@ class SecureWebSocketServer {
   /**
    * Inicia o servidor WebSocket seguro (WSS)
    */
-  start(port = 3002) {
+  /**
+   * Inicia o servidor WebSocket seguro (WSS)
+   */
+  start(port = 3002, printerManager) {
     try {
+      this.printerManager = printerManager;
       // Criar WebSocket Server simples (sem SSL)
       this.wss = new WebSocketServer({ port });
 
@@ -74,14 +78,13 @@ class SecureWebSocketServer {
       // Novo: Listar impressoras
       if (data.type === 'list-printers') {
         try {
-          const PrinterManager = require('../printer/manager');
-          // Se já existe uma instância global, use-a; senão, crie uma temporária
-          let printers;
-          if (global.thermalPrinterManager && typeof global.thermalPrinterManager.getPrinters === 'function') {
-            printers = global.thermalPrinterManager.getPrinters();
+          // Use the injected manager
+          let printers = [];
+          if (this.printerManager) {
+            printers = this.printerManager.getPrinters();
           } else {
-            const tempManager = new PrinterManager();
-            printers = tempManager.getPrinters();
+            // Fallback minimal
+            logger.warn('PrinterManager não injetado no WebSocketServer');
           }
           ws.send(JSON.stringify({ type: 'printers-list', printers }));
         } catch (err) {
@@ -142,9 +145,9 @@ class SecureWebSocketServer {
     }
 
     try {
-      // Importar PrinterManager dinamicamente para evitar circular dependency
-      const PrinterManager = require('../printer/manager');
-      const manager = new PrinterManager();
+      if (!this.printerManager) throw new Error('PrinterManager não disponível');
+
+      const manager = this.printerManager;
 
       if (printer) {
         await manager.print(printer, orderData, printType || 'counter', rawContent);
@@ -177,10 +180,9 @@ class SecureWebSocketServer {
     const { printer } = data;
 
     try {
-      const PrinterManager = require('../printer/manager');
-      const manager = new PrinterManager();
+      if (!this.printerManager) throw new Error('PrinterManager não disponível');
 
-      await manager.testPrint(printer);
+      await this.printerManager.testPrint(printer);
 
       ws.send(JSON.stringify({
         success: true,
@@ -200,9 +202,9 @@ class SecureWebSocketServer {
    */
   async handleListPrinters(ws) {
     try {
-      const PrinterManager = require('../printer/manager');
-      const manager = new PrinterManager();
-      const printers = manager.getPrinters();
+      if (!this.printerManager) throw new Error('PrinterManager não disponível');
+
+      const printers = this.printerManager.getPrinters();
 
       ws.send(JSON.stringify({
         success: true,

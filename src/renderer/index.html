@@ -1,78 +1,150 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Thermal Print Service</title>
-  <link rel="stylesheet" href="styles.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hub Impressão</title>
+  
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div class="container">
-    <header>
-      <h1>🖨️ Thermal Print Service</h1>
-      <p class="subtitle">Configurações e Monitoramento</p>
-    </header>
-
-    <nav class="tabs">
-      <button class="tab active" data-tab="dashboard">Dashboard</button>
-      <button class="tab" data-tab="printers">Impressoras</button>
-    </nav>
-
-    <!-- Dashboard Tab -->
-    <div class="tab-content active" id="dashboard">
-      <div class="cards">
-        <div class="card">
-          <h3>Status do Serviço</h3>
-          <div class="status-indicator online">
-            <span class="dot"></span> Online
-          </div>
-          <p class="info">Porta: 3001</p>
-        </div>
-
-        <div class="card">
-          <h3>Impressoras</h3>
-          <p class="big-number" id="printer-count">0</p>
-          <p class="label">Disponíveis</p>
-        </div>
-
-        <div class="card">
-          <h3>API</h3>
-          <p class="info"><code>http://localhost:3001/api</code></p>
-          <p class="info"><code>ws://localhost:3001</code></p>
-        </div>
-      </div>
-
-      <div class="card logs">
-        <h3>Últimos Eventos</h3>
-        <div id="logs" class="log-container">
-          <p class="log-entry">Sistema iniciado...</p>
-        </div>
-      </div>
-    </div>
-
-    <!-- Printers Tab -->
-    <div class="tab-content" id="printers">
-      <div class="toolbar">
-        <button class="btn btn-primary" id="refresh-printers">
-          🔄 Atualizar Lista
-        </button>
-      </div>
-
-      <div id="printer-list" class="printer-list">
-        <p class="loading">Carregando impressoras...</p>
+  <div class="app-container">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo-icon">🖨️</div>
+        <h2>Hub Impressão</h2>
       </div>
       
-      <div class="test-section">
-        <h3>Testar Impressão</h3>
-        <div class="test-controls">
-          <select id="test-printer" class="printer-select">
-            <option value="">Selecione uma impressora</option>
-          </select>
-          <button class="btn btn-success" onclick="testPrint()">🧪 Imprimir Teste</button>
+      <nav class="nav-menu">
+        <button class="nav-item active" data-tab="dashboard">
+          <span class="icon">📊</span> Dashboard
+        </button>
+        <button class="nav-item" data-tab="printers">
+          <span class="icon">📠</span> Impressoras
+        </button>
+        <button class="nav-item" data-tab="logs">
+          <span class="icon">📝</span> Logs
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="status-badge online">
+          <span class="pulse"></span> Sistema Online
         </div>
-        <div id="settings-status" class="status-message" style="margin-top:12px;"></div>
+        <div class="version">v1.0.0</div>
       </div>
-    </div>
+    </aside>
+
+    <main class="main-content">
+      <!-- Dashboard View -->
+      <section id="dashboard" class="view active">
+        <header class="view-header">
+          <div>
+            <h1>Visão Geral</h1>
+            <p>Monitoramento em tempo real do serviço de impressão</p>
+          </div>
+          <div class="server-status">
+            <span class="label">Servidor Local</span>
+            <span class="value">Porta 3001</span>
+          </div>
+        </header>
+
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="icon-wrapper blue">
+              <span>🖨️</span>
+            </div>
+            <div class="stat-info">
+              <span class="stat-value" id="printer-count">0</span>
+              <span class="stat-label">Impressoras</span>
+            </div>
+          </div>
+          
+          <div class="stat-card">
+            <div class="icon-wrapper green">
+              <span>⚡</span>
+            </div>
+            <div class="stat-info">
+              <span class="stat-value" id="ws-status">Ativo</span>
+              <span class="stat-label">WebSocket</span>
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="icon-wrapper purple">
+              <span>🔗</span>
+            </div>
+            <div class="stat-info">
+              <span class="stat-value">API</span>
+              <span class="stat-label">Pronto</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass-panel">
+          <div class="panel-header">
+            <h3>Atividade Recente</h3>
+          </div>
+          <div id="dashboard-logs" class="activity-list">
+            <!-- Logs injected here -->
+            <div class="empty-state">Nenhuma atividade recente</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Printers View -->
+      <section id="printers" class="view">
+        <header class="view-header">
+          <div>
+            <h1>Gerenciar Impressoras</h1>
+            <p>Configure e teste seus dispositivos</p>
+          </div>
+          <button class="btn-primary" id="refresh-printers">
+            <span>🔄</span> Atualizar Lista
+          </button>
+        </header>
+
+        <div class="content-wrapper">
+          <div id="printer-list" class="printer-grid">
+            <!-- Printer cards injected here -->
+            <div class="loading-state">
+              <div class="spinner"></div>
+              <p>Buscando impressoras...</p>
+            </div>
+          </div>
+
+          <div class="glass-panel test-panel">
+            <h3>Teste Rápido</h3>
+            <div class="test-controls">
+              <select id="test-printer" class="custom-select">
+                <option value="">Selecione uma impressora...</option>
+              </select>
+              <button class="btn-secondary" onclick="testPrint()">
+                Enviar Teste
+              </button>
+            </div>
+            <div id="settings-status" class="status-message"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Logs View (New dedicated view) -->
+      <section id="logs" class="view">
+        <header class="view-header">
+          <h1>Log do Sistema</h1>
+        </header>
+        <div class="glass-panel full-height">
+          <div id="full-logs" class="log-terminal">
+            <!-- Full logs -->
+          </div>
+        </div>
+      </section>
+    </main>
   </div>
 
   <script src="app.js"></script>

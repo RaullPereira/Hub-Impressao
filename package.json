@@ -9,6 +9,7 @@
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
+    "clean": "rm -rf dist node_modules",
     "dev": "electron .",
     "install:mac": "npm install --no-optional",
     "install:win": "npm install",
@@ -47,13 +48,15 @@
     ],
     "mac": {
       "icon": "assets/icons/app.icns",
-      "target": ["zip", "pkg"]
+      "target": [
+        "zip",
+        "pkg"
+      ]
     },
     "win": {
       "icon": "assets/icons/app.ico",
       "target": "nsis"
-    }
-    ,
+    },
     "publish": [
       {
         "provider": "github",

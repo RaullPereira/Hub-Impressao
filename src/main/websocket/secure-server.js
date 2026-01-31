@@ -75,12 +75,13 @@ class SecureWebSocketServer {
       logger.info('Mensagem recebida via WebSocket:', { raw: message.toString(), json: data });
       logger.info(`Tipo de mensagem recebida: ${data.type}`);
 
-      // Novo: Listar impressoras
+      // Novo: Listar impressoras (garante refresh antes de responder)
       if (data.type === 'list-printers') {
         try {
           // Use the injected manager
           let printers = [];
           if (this.printerManager) {
+            try { await this.printerManager.refreshPrinters(); } catch (e) { logger.warn('refreshPrinters falhou no WS:', e && e.message ? e.message : e); }
             printers = this.printerManager.getPrinters();
           } else {
             // Fallback minimal
@@ -150,14 +151,14 @@ class SecureWebSocketServer {
       const manager = this.printerManager;
 
       if (printer) {
-        await manager.print(printer, orderData, printType || 'counter', rawContent);
+        await manager.print({ printer, orderData, rawContent, printType });
       } else {
         // Usar primeira impressora disponível
         const printers = manager.getPrinters();
         if (printers.length === 0) {
           throw new Error('Nenhuma impressora disponível');
         }
-        await manager.print(printers[0].id, orderData, printType || 'counter');
+        await manager.print({ printer: printers[0].id, orderData, printType });
       }
 
       ws.send(JSON.stringify({

@@ -17,6 +17,8 @@ class Settings {
             delivery: null
           },
           usbMappings: {},
+          // Impressoras adicionadas manualmente pelo usuário (nomes exatos do Windows)
+          manualPrinters: [],
           // printChannel: 'local' | 'qz' — controls whether to use local printing or forward to QZ Tray
           printChannel: 'local',
           // Optional QZ endpoint to forward print requests when printChannel === 'qz'
@@ -67,6 +69,26 @@ class Settings {
     const settings = this.getAll();
     if (!settings.usbMappings) settings.usbMappings = {};
     settings.usbMappings[usbId] = windowsPrinterName;
+    return this.save(settings);
+  }
+
+  static getManualPrinters() {
+    const settings = this.getAll();
+    return settings.manualPrinters || [];
+  }
+
+  static addManualPrinter(name) {
+    const settings = this.getAll();
+    if (!settings.manualPrinters) settings.manualPrinters = [];
+    // prevent duplicates
+    if (!settings.manualPrinters.includes(name)) settings.manualPrinters.push(name);
+    return this.save(settings);
+  }
+
+  static removeManualPrinter(name) {
+    const settings = this.getAll();
+    if (!settings.manualPrinters) return false;
+    settings.manualPrinters = settings.manualPrinters.filter(n => n !== name);
     return this.save(settings);
   }
 }

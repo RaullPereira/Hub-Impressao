@@ -30,20 +30,41 @@ class Server {
       res.json({ status: 'ok', timestamp: new Date().toISOString() });
     });
 
-    // Listar impressoras
-    this.app.get('/api/printers', (req, res) => {
+    // Listar impressoras (garante refresh antes de responder)
+    this.app.get('/api/printers', async (req, res) => {
       try {
+        if (this.printerManager && this.printerManager.refreshPrinters) {
+          try { await this.printerManager.refreshPrinters(); } catch (e) { logger.warn('refreshPrinters falhou ao listar impressoras:', e && e.message ? e.message : e); }
+        }
         const printers = this.printerManager.getPrinters();
         // Anexa mapeamento Windows (se existir) para cada impressora USB
         const Settings = require('./config/settings');
-        const enriched = printers.map(p => {
+        const enriched = (printers || []).map(p => {
           const mapping = Settings.getUsbMapping(p.id);
           return Object.assign({}, p, { windowsMapping: mapping || null });
         });
-        res.json({ success: true, printers: enriched });
+
+        // Inclui impressoras manuais (se houver)
+        const manual = (Settings.getManualPrinters() || []).map(name => ({ id: name, name, type: 'manual', isDefault: false }));
+
+        res.json({ success: true, printers: enriched.concat(manual) });
       } catch (error) {
         logger.error('Erro ao listar impressoras:', error);
         res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // Adicionar impressora manual (nome exato do Windows)
+    this.app.post('/api/printers/manual', (req, res) => {
+      try {
+        const { name } = req.body || {};
+        if (!name || typeof name !== 'string' || name.trim() === '') return res.status(400).json({ success: false, error: 'name é obrigatório' });
+        const Settings = require('./config/settings');
+        Settings.addManualPrinter(name.trim());
+        res.json({ success: true });
+      } catch (err) {
+        logger.error('Erro ao adicionar impressora manual:', err);
+        res.status(500).json({ success: false, error: err.message });
       }
     });
 
@@ -132,7 +153,7 @@ class Server {
         logger.info(`printerId: ${printerId}`);
         logger.info(`printType: ${printType}`);
 
-        await this.printerManager.print(printerId, orderData, printType);
+        await this.printerManager.print({ printer: printerId, orderData, printType });
 
         res.json({ success: true, message: 'Pedido impresso!' });
       } catch (error) {
@@ -151,7 +172,7 @@ class Server {
 
         if (!settings.printChannel || settings.printChannel === 'local') {
           // Imprime localmente
-          await this.printerManager.print(printerId, orderData, printType);
+          await this.printerManager.print({ printer: printerId, orderData, printType });
           return res.json({ success: true, message: 'Impressão local enviada' });
         }
 

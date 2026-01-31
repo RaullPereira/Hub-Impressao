@@ -1,6 +1,7 @@
 const { exec } = require('child_process');
 const { promisify } = require('util');
 const execP = promisify(exec);
+const logger = require('../utils/logger');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -102,12 +103,16 @@ function getTempFilePath(prefix, ext) {
 async function listPrinters() {
   try {
     const { stdout } = await execP('powershell -NoProfile -Command "Get-Printer | Select-Object -ExpandProperty Name"');
+    logger.info('[win-spool] listPrinters - powershell stdout length=' + String((stdout||'').length));
     return stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
   } catch (err) {
+    logger.warn('[win-spool] listPrinters - powershell failed: ' + (err && err.message ? err.message : String(err)));
     try {
       const { stdout } = await execP('wmic printer get name');
+      logger.info('[win-spool] listPrinters - wmic stdout length=' + String((stdout||'').length));
       return stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean).slice(1);
     } catch (e) {
+      logger.error('[win-spool] listPrinters - wmic failed: ' + (e && e.message ? e.message : String(e)));
       return [];
     }
   }
@@ -116,9 +121,11 @@ async function listPrinters() {
 async function getDefaultPrinter() {
   try {
     const { stdout } = await execP('powershell -NoProfile -Command "(Get-Printer | Where-Object {$_.Default -eq $true}).Name"');
+    logger.info('[win-spool] getDefaultPrinter - stdout length=' + String((stdout||'').length));
     const p = stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0];
     return p || null;
   } catch (err) {
+    logger.warn('[win-spool] getDefaultPrinter failed: ' + (err && err.message ? err.message : String(err)));
     return null;
   }
 }

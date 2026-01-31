@@ -31,9 +31,9 @@ class ThermalPrintApp {
       this.server = new Server(this.printerManager);
       this.server.start();
 
-      // Iniciar servidor WebSocket seguro
+      // Iniciar servidor WebSocket seguro e injetar PrinterManager
       this.wss = SecureWebSocketServer;
-      this.wss.start(3002);
+      this.wss.start(3002, this.printerManager);
       logger.info(`Token WebSocket: ${this.wss.getToken()}`);
 
       this.tray = new TrayManager(this);

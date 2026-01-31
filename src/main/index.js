@@ -6,7 +6,8 @@ let PrinterManager;
 if (process.platform === 'win32') {
   PrinterManager = require('./printer/windows-manager');
 } else {
-  PrinterManager = require('./printer/cups-manager');
+  // On non-windows, use hybrid manager which handles USB/CUPS
+  PrinterManager = require('./printer/hybrid-manager');
 }
 const SecureWebSocketServer = require('./websocket/secure-server');
 const logger = require('./utils/logger');
@@ -32,7 +33,7 @@ class ThermalPrintApp {
 
       // Iniciar servidor WebSocket seguro
       this.wss = SecureWebSocketServer;
-      this.wss.start(3002, this.printerManager);
+      this.wss.start(3002);
       logger.info(`Token WebSocket: ${this.wss.getToken()}`);
 
       this.tray = new TrayManager(this);
@@ -127,7 +128,7 @@ app.whenReady().then(() => {
   }
 });
 
-app.on('window-all-closed', () => { });
+app.on('window-all-closed', () => {});
 
 app.on('before-quit', () => {
   logger.info('app.before-quit event fired');

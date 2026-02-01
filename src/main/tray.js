@@ -12,29 +12,62 @@ class TrayManager {
   }
 
   createTray() {
-    // Resolve o caminho do ícone dependendo se o app está empacotado.
-    let iconPath;
-    if (app.isPackaged) {
-      const icnsPath = path.join(process.resourcesPath, 'assets', 'icons', 'app.icns');
-      const icoPath = path.join(process.resourcesPath, 'assets', 'icons', 'app.ico');
-      const svgPath = path.join(process.resourcesPath, 'assets', 'icons', 'printer-svgrepo-com.svg');
-      if (fs.existsSync(icnsPath)) iconPath = icnsPath; // Prefer .icns on Mac if available
-      else if (fs.existsSync(svgPath)) iconPath = svgPath;
-      else if (fs.existsSync(icoPath)) iconPath = icoPath;
-      else iconPath = svgPath;
+    // Select platform-appropriate icon paths and prefer template PNG on macOS
+    const candidates = [];
+    const basePath = app.isPackaged ? path.join(process.resourcesPath, 'assets', 'icons') : path.join(__dirname, '../../assets/icons');
+
+    if (process.platform === 'darwin') {
+      // Prefer a monochrome PNG template for the menu bar
+      candidates.push(path.join(basePath, 'trayTemplate.png'));
+      candidates.push(path.join(basePath, 'trayTemplate@2x.png'));
+      candidates.push(path.join(basePath, 'app.icns'));
+      candidates.push(path.join(basePath, 'printer-svgrepo-com.svg'));
+    } else if (process.platform === 'win32') {
+      candidates.push(path.join(basePath, 'app.ico'));
+      candidates.push(path.join(basePath, 'tray.png'));
+      candidates.push(path.join(basePath, 'printer-svgrepo-com.svg'));
     } else {
+      // linux / others
+      candidates.push(path.join(basePath, 'tray.png'));
+      candidates.push(path.join(basePath, 'printer-svgrepo-com.svg'));
+    }
+
+    let iconPath = candidates.find(p => fs.existsSync(p));
+    if (!iconPath) {
+      // last resort: try the original svg in repo
       iconPath = path.join(__dirname, '../../assets/icons/printer-svgrepo-com.svg');
     }
 
     let trayIcon = nativeImage.createFromPath(iconPath);
+    if (trayIcon.isEmpty && fs.existsSync(iconPath)) {
+      // try read buffer fallback
+      try {
+        const buf = fs.readFileSync(iconPath);
+        trayIcon = nativeImage.createFromBuffer(buf);
+      } catch (e) {
+        logger.warn('Tray icon createFromBuffer failed', e && e.message ? e.message : e);
+      }
+    }
 
-    // Resize for macOS menu bar (standard is usually 16x16 or 22x22)
-    // If it's too big, it might not show or look weird
+    if (trayIcon.isEmpty()) {
+      logger.warn('Tray icon is empty for path: ' + String(iconPath));
+    }
+
+    // Resize and treat template images on macOS
     if (process.platform === 'darwin') {
-      trayIcon = trayIcon.resize({ width: 22, height: 22 });
-      trayIcon.setTemplateImage(true); // Allows macOS to color it white/black automatically
+      try {
+        trayIcon = trayIcon.resize({ width: 22, height: 22 });
+        // Only set template if we selected a PNG template file
+        if (iconPath.toLowerCase().endsWith('.png')) trayIcon.setTemplateImage(true);
+      } catch (e) {
+        logger.warn('Failed to resize/setTemplateImage on tray icon', e && e.message ? e.message : e);
+      }
     } else {
-      trayIcon = trayIcon.resize({ width: 32, height: 32 });
+      try {
+        trayIcon = trayIcon.resize({ width: 32, height: 32 });
+      } catch (e) {
+        logger.warn('Failed to resize tray icon', e && e.message ? e.message : e);
+      }
     }
 
     this.tray = new Tray(trayIcon);

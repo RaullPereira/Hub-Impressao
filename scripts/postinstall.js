@@ -16,3 +16,10 @@ if (platform !== 'win32') {
 } else {
   console.log('postinstall: Windows detected, leaving optional dependencies (printer) installed');
 }
+
+// Ensure tray icons exist (create minimal placeholders when missing)
+try {
+  require('./generate-tray-icons');
+} catch (e) {
+  console.warn('postinstall: generate-tray-icons failed', e && e.message ? e.message : e);
+}

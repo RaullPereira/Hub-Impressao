@@ -108,6 +108,7 @@ class SecureWebSocketServer {
       // Processar comando
       switch (data.type) {
         case 'print':
+        case 'print-raw':
           await this.handlePrint(ws, data);
           break;
         case 'test':
@@ -135,7 +136,14 @@ class SecureWebSocketServer {
    * Processa comando de impressão
    */
   async handlePrint(ws, data) {
-    const { orderData, printer, printType, rawContent } = data;
+    const { orderData, printer, printType, rawContent, useRawContent, type } = data;
+    
+    // Determina se deve usar rawContent diretamente
+    const shouldUseRaw = useRawContent === true || type === 'print-raw';
+    
+    logger.info(`[handlePrint] useRawContent: ${useRawContent}, type: ${type}, shouldUseRaw: ${shouldUseRaw}`);
+    logger.info(`[handlePrint] rawContent presente: ${!!rawContent}, tamanho: ${rawContent ? rawContent.length : 0}`);
+    
     if (!printer || typeof printer !== 'string' || printer.trim() === '') {
       ws.send(JSON.stringify({
         success: false,
@@ -151,7 +159,13 @@ class SecureWebSocketServer {
       const manager = this.printerManager;
 
       if (printer) {
-        await manager.print({ printer, orderData, rawContent, printType });
+        await manager.print({ 
+          printer, 
+          orderData, 
+          rawContent, 
+          printType,
+          useRawContent: shouldUseRaw 
+        });
       } else {
         // Usar primeira impressora disponível
         const printers = manager.getPrinters();

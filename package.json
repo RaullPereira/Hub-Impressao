@@ -1,6 +1,6 @@
 {
   "name": "@raullpereira/hub-impressao",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Serviço de impressão térmica em background",
   "author": "Raull Pereira",
   "publishConfig": {
@@ -15,7 +15,9 @@
     "install:win": "npm install",
     "postinstall": "node scripts/postinstall.js",
     "build:mac": "electron-builder --mac",
-    "build:win": "electron-builder --win",
+    "build:win": "electron-builder --win --x64 --ia32",
+    "build:win64": "electron-builder --win --x64",
+    "build:win32": "electron-builder --win --ia32",
     "build": "electron-builder"
   },
   "dependencies": {
@@ -44,18 +46,42 @@
     "files": [
       "build/**/*",
       "src/**/*",
+      "assets/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "assets",
+        "to": "assets"
+      }
     ],
     "mac": {
       "icon": "assets/icons/app.icns",
       "target": [
         "zip",
         "pkg"
-      ]
+      ],
+      "category": "public.app-category.utilities"
     },
     "win": {
       "icon": "assets/icons/app.ico",
-      "target": "nsis"
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64", "ia32"]
+        }
+      ],
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "installerIcon": "assets/icons/app.ico",
+      "uninstallerIcon": "assets/icons/app.ico",
+      "include": "build/installer.nsh"
     },
     "publish": [
       {

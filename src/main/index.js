@@ -12,6 +12,37 @@ if (process.platform === 'win32') {
 const SecureWebSocketServer = require('./websocket/secure-server');
 const logger = require('./utils/logger');
 
+// Verificar se foi iniciado com --hidden (auto-start)
+const startHidden = process.argv.includes('--hidden');
+
+// Configurar auto-start no login (cross-platform)
+function setupAutoStart() {
+  try {
+    const appPath = process.execPath;
+    const appName = 'Hub Impressao';
+    
+    if (process.platform === 'darwin') {
+      // macOS: usar Login Items (via apple script ou plist)
+      app.setLoginItemSettings({
+        openAtLogin: true,
+        openAsHidden: true,
+        path: appPath,
+        args: ['--hidden']
+      });
+    } else if (process.platform === 'win32') {
+      // Windows: configurado via NSIS no instalador
+      app.setLoginItemSettings({
+        openAtLogin: true,
+        openAsHidden: true,
+        args: ['--hidden']
+      });
+    }
+    logger.info('Auto-start configurado com sucesso');
+  } catch (e) {
+    logger.warn('Falha ao configurar auto-start:', e.message);
+  }
+}
+
 class ThermalPrintApp {
   constructor() {
     this.mainWindow = null;
@@ -25,8 +56,9 @@ class ThermalPrintApp {
     try {
       logger.info('Inicializando aplicação (initialize)');
       this.printerManager = new PrinterManager();
-      this.printerManager.startAutoDiscovery(10000);
-      logger.info('Descoberta automática de impressoras iniciada');
+      // Intervalo de 30 segundos para melhor performance (era 10000ms)
+      this.printerManager.startAutoDiscovery(30000);
+      logger.info('Descoberta automática de impressoras iniciada (intervalo: 30s)');
 
       this.server = new Server(this.printerManager);
       this.server.start();
@@ -96,9 +128,21 @@ const thermalApp = new ThermalPrintApp();
 // default flag for close-to-tray behavior
 app.isQuiting = false;
 
+// Otimização: desabilitar aceleração de hardware se não necessário
+app.disableHardwareAcceleration();
+
 app.whenReady().then(() => {
   thermalApp.initialize();
-  thermalApp.createConfigWindow();
+  
+  // Configurar auto-start
+  setupAutoStart();
+  
+  // Se iniciado com --hidden, não mostrar a janela
+  if (!startHidden) {
+    thermalApp.createConfigWindow();
+  } else {
+    logger.info('Iniciado em modo oculto (--hidden)');
+  }
 });
 
 // Create a proper application menu for macOS to include Quit

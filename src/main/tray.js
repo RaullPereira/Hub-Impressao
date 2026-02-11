@@ -83,10 +83,37 @@ class TrayManager {
   }
 
   buildMenu() {
+    // Verificar se auto-start está ativado
+    const loginSettings = app.getLoginItemSettings();
+    const autoStartEnabled = loginSettings.openAtLogin;
+    
     return Menu.buildFromTemplate([
       {
         label: 'Abrir Painel',
         click: () => this.mainApp.createConfigWindow()
+      },
+      { type: 'separator' },
+      {
+        label: 'Iniciar com o Sistema',
+        type: 'checkbox',
+        checked: autoStartEnabled,
+        click: (menuItem) => {
+          const enable = menuItem.checked;
+          logger.info(`Auto-start ${enable ? 'habilitado' : 'desabilitado'}`);
+          
+          if (process.platform === 'darwin') {
+            app.setLoginItemSettings({
+              openAtLogin: enable,
+              openAsHidden: true,
+              args: ['--hidden']
+            });
+          } else {
+            app.setLoginItemSettings({
+              openAtLogin: enable,
+              args: ['--hidden']
+            });
+          }
+        }
       },
       { type: 'separator' },
       {

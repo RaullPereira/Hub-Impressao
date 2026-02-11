@@ -1,6 +1,11 @@
 const { EventEmitter } = require('events');
 const escpos = require('escpos');
-const USB = require('escpos-usb');
+let USB = null;
+try {
+  USB = require('escpos-usb');
+} catch (e) {
+  // escpos-usb não disponível nesta plataforma
+}
 const Network = require('escpos-network');
 const logger = require('../utils/logger');
 const { execSync } = require('child_process');
@@ -20,8 +25,8 @@ class PrinterManager extends EventEmitter {
   async discoverPrinters() {
     try {
       this.printers.clear();
-      // Listar impressoras USB
-      const usbDevices = USB.findPrinter();
+      // Listar impressoras USB (apenas se o módulo estiver disponível)
+      const usbDevices = USB ? USB.findPrinter() : [];
       usbDevices.forEach((device, index) => {
         const desc = device.deviceDescriptor;
         let name = `USB_${desc.idVendor.toString(16)}_${desc.idProduct.toString(16)}`;
@@ -218,6 +223,9 @@ class PrinterManager extends EventEmitter {
     let device;
     if (printer.type === 'usb') {
       // Buscar o device novamente
+      if (!USB) {
+        throw new Error('Módulo escpos-usb não disponível nesta plataforma');
+      }
       const usbDevices = USB.findPrinter();
       if (!usbDevices[printer.index]) {
         throw new Error('Impressora USB não encontrada');
@@ -374,6 +382,9 @@ class PrinterManager extends EventEmitter {
     // USB / Network via escpos
     let device;
     if (printer.type === 'usb') {
+      if (!USB) {
+        throw new Error('Módulo escpos-usb não disponível nesta plataforma');
+      }
       const usbDevices = USB.findPrinter();
       if (!usbDevices[printer.index]) {
         logger.error(`[PRINT] Impressora USB '${printer.name}' não encontrada pelo índice: ${printer.index}`);

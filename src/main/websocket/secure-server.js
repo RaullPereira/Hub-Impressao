@@ -109,18 +109,33 @@ class SecureWebSocketServer {
       switch (data.type) {
         case 'print':
         case 'print-raw':
+        case 'print_order':
+        case 'printOrder':
+        case 'local-print':
+        case 'localPrint':
           await this.handlePrint(ws, data);
           break;
         case 'test':
+        case 'test-print':
+        case 'testPrint':
           await this.handleTest(ws, data);
           break;
         case 'list-printers':
+        case 'listPrinters':
+        case 'get-printers':
+        case 'getPrinters':
           await this.handleListPrinters(ws);
           break;
+        case 'ping':
+        case 'heartbeat':
+          ws.send(JSON.stringify({ type: 'pong', success: true }));
+          break;
         default:
+          logger.warn(`Tipo de comando desconhecido recebido: ${data.type}`);
+          logger.warn(`Dados completos: ${JSON.stringify(data)}`);
           ws.send(JSON.stringify({
             success: false,
-            error: 'Tipo de comando desconhecido'
+            error: `Tipo de comando desconhecido: ${data.type}. Tipos suportados: print, print-raw, test, list-printers, ping`
           }));
       }
     } catch (error) {

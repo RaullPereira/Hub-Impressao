@@ -1,5 +1,6 @@
-const { app, BrowserWindow, ipcMain, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, nativeImage } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const TrayManager = require('./tray');
 const Server = require('./server');
 let PrinterManager;
@@ -14,6 +15,19 @@ const logger = require('./utils/logger');
 
 // Verificar se foi iniciado com --hidden (auto-start)
 const startHidden = process.argv.includes('--hidden');
+
+function getAppIconPath() {
+  const base = path.join(__dirname, '../../assets/icons');
+  const trayPng = path.join(base, 'trayTemplate.png');
+  if (fs.existsSync(trayPng)) return trayPng;
+  if (process.platform === 'win32') {
+    const ico = path.join(base, 'app.ico');
+    if (fs.existsSync(ico)) return ico;
+  }
+  const png = path.join(base, 'app.png');
+  if (fs.existsSync(png)) return png;
+  return null;
+}
 
 // Configurar auto-start no login (cross-platform)
 function setupAutoStart() {
@@ -83,15 +97,17 @@ class ThermalPrintApp {
       this.mainWindow.focus();
       return;
     }
+    const iconPath = getAppIconPath();
     this.mainWindow = new BrowserWindow({
       width: 900,
       height: 700,
+      icon: iconPath,
       webPreferences: {
-        preload: path.join(__dirname, '../preload.js'),
+        preload: path.join(__dirname, '../../preload.js'),
         contextIsolation: true,
-        nodeIntegration: false
+        nodeIntegration: false,
+        sandbox: false
       },
-      // show window on startup
       show: true
     });
     this.mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
@@ -133,10 +149,21 @@ app.disableHardwareAcceleration();
 
 app.whenReady().then(() => {
   thermalApp.initialize();
-  
+
+  // Ícone no dock (macOS) — evita logo do Electron/React
+  const iconPath = getAppIconPath();
+  if (iconPath && process.platform === 'darwin' && app.dock) {
+    try {
+      const icon = nativeImage.createFromPath(iconPath);
+      if (!icon.isEmpty()) app.dock.setIcon(icon);
+    } catch (e) {
+      logger.warn('Falha ao definir ícone do dock:', e.message);
+    }
+  }
+
   // Configurar auto-start
   setupAutoStart();
-  
+
   // Se iniciado com --hidden, não mostrar a janela
   if (!startHidden) {
     thermalApp.createConfigWindow();
@@ -145,22 +172,51 @@ app.whenReady().then(() => {
   }
 });
 
-// Create a proper application menu for macOS to include Quit
+// Menu da aplicação (macOS: atalhos Cmd+C, Cmd+V, etc. funcionam com submenu Edit)
 app.whenReady().then(() => {
   try {
+    const appName = app.name || 'Hub Impressao';
     const template = [
       {
-        label: app.name || 'Hub Impressao',
+        label: appName,
         submenu: [
+          { role: 'about', label: `Sobre ${appName}` },
+          { type: 'separator' },
+          { role: 'services', label: 'Serviços' },
+          { type: 'separator' },
+          { role: 'hide', label: `Ocultar ${appName}` },
+          { role: 'hideOthers', label: 'Ocultar Outros' },
+          { role: 'unhide', label: 'Mostrar Todos' },
+          { type: 'separator' },
           {
-            label: `Quit ${app.name || 'Hub Impressao'}`,
+            label: `Sair de ${appName}`,
             accelerator: 'CmdOrCtrl+Q',
             click: () => {
-              logger.info('Application menu -> Quit clicked');
               app.isQuiting = true;
               app.quit();
             }
           }
+        ]
+      },
+      {
+        label: 'Editar',
+        submenu: [
+          { role: 'undo', label: 'Desfazer' },
+          { role: 'redo', label: 'Refazer' },
+          { type: 'separator' },
+          { role: 'cut', label: 'Recortar' },
+          { role: 'copy', label: 'Copiar' },
+          { role: 'paste', label: 'Colar' },
+          { role: 'selectAll', label: 'Selecionar Tudo' }
+        ]
+      },
+      {
+        label: 'Janela',
+        submenu: [
+          { role: 'minimize', label: 'Minimizar' },
+          { role: 'zoom', label: 'Aumentar' },
+          { type: 'separator' },
+          { role: 'front', label: 'Trazer Tudo para a Frente' }
         ]
       }
     ];

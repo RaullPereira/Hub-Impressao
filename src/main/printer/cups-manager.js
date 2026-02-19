@@ -150,9 +150,14 @@ class CUPSPrinterManager {
     logger.info('[PRINT] Impressora selecionada:', printer.name);
 
     let escposBuffer;
-    
-    // Se useRawContent === true e rawContent está presente, usa diretamente sem gerar formatação própria
-    if (useRawContent && rawContent) {
+    // Se orderData.text existir, imprime puro SEMPRE
+    if (orderData && orderData.text) {
+      logger.info('[PRINT] Imprimindo texto puro do campo manual-text');
+      // Adiciona várias quebras de linha e comando de corte ESC/POS ao final, usando encoding latin1
+      const texto = orderData.text + '\n\n\n\n\n\n';
+      const corte = Buffer.from([0x1D, 0x56, 0x00]);
+      escposBuffer = Buffer.concat([Buffer.from(texto, 'latin1'), corte]);
+    } else if (useRawContent && rawContent) {
       logger.info('[PRINT] ⚡ Usando rawContent DIRETAMENTE (useRawContent=true)');
       if (typeof rawContent === 'string') {
         // Decodifica Base64

@@ -53,14 +53,13 @@ class TrayManager {
       logger.warn('Tray icon is empty for path: ' + String(iconPath));
     }
 
-    // Resize and treat template images on macOS
+    // Resize tray icon; no template no macOS para o ícone aparecer com o desenho (evita quadrado branco)
     if (process.platform === 'darwin') {
       try {
         trayIcon = trayIcon.resize({ width: 22, height: 22 });
-        // Only set template if we selected a PNG template file
-        if (iconPath.toLowerCase().endsWith('.png')) trayIcon.setTemplateImage(true);
+        trayIcon.setTemplateImage(false);
       } catch (e) {
-        logger.warn('Failed to resize/setTemplateImage on tray icon', e && e.message ? e.message : e);
+        logger.warn('Failed to resize tray icon', e && e.message ? e.message : e);
       }
     } else {
       try {

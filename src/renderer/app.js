@@ -1,4 +1,20 @@
 document.addEventListener('DOMContentLoaded', () => {
+  // Textarea: sem handlers customizados — Ctrl+V / Cmd+V e copiar/colar funcionam nativamente
+  const textarea = document.getElementById('manual-text');
+  if (textarea) {
+    textarea.removeAttribute('readonly');
+    textarea.removeAttribute('disabled');
+  }
+
+  // Botão "Colar do Clipboard" (fallback via API do Electron)
+  const btnPaste = document.getElementById('btn-paste-clipboard');
+  if (btnPaste && textarea && window.api && window.api.readClipboard) {
+    btnPaste.addEventListener('click', () => {
+      const text = window.api.readClipboard();
+      if (text) textarea.value = text;
+    });
+  }
+
   const navItems = document.querySelectorAll('.nav-item');
   const views = document.querySelectorAll('.view');
 
@@ -28,6 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
 async function loadPrinters() {
   const listEl = document.getElementById('printer-list');
   const select = document.getElementById('test-printer');
+  const manualSelect = document.getElementById('manual-printer');
   const countEl = document.getElementById('printer-count');
 
   if (listEl) listEl.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Buscando impressoras...</p></div>`;
@@ -39,11 +56,15 @@ async function loadPrinters() {
     if (!printers || printers.length === 0) {
       if (listEl) listEl.innerHTML = `<div class="empty-state">Nenhuma impressora encontrada</div>`;
       if (select) select.innerHTML = `<option value="">Selecione uma impressora...</option>`;
+      if (manualSelect) manualSelect.innerHTML = `<option value="">Selecione uma impressora...</option>`;
       return;
     }
 
     if (select) {
       select.innerHTML = `<option value="">Selecione uma impressora...</option>`;
+    }
+    if (manualSelect) {
+      manualSelect.innerHTML = `<option value="">Selecione uma impressora...</option>`;
     }
 
     if (listEl) listEl.innerHTML = '';
@@ -64,7 +85,46 @@ async function loadPrinters() {
         opt.textContent = p.name;
         select.appendChild(opt);
       }
+      if (manualSelect) {
+        const opt2 = document.createElement('option');
+        opt2.value = p.name;
+        opt2.textContent = p.name;
+        manualSelect.appendChild(opt2);
+      }
     });
+window.manualPrint = async function manualPrint() {
+  const select = document.getElementById('manual-printer');
+  const textarea = document.getElementById('manual-text');
+  const status = document.getElementById('manual-print-status');
+  const printer = select ? select.value : '';
+  const text = textarea ? textarea.value : '';
+  if (!printer) {
+    if (status) status.textContent = 'Selecione uma impressora.';
+    return;
+  }
+  if (!text || text.trim() === '') {
+    if (status) status.textContent = 'Digite o texto para imprimir.';
+    return;
+  }
+  console.log('[manualPrint] Texto a ser impresso:', text);
+  if (status) status.textContent = 'Enviando para impressão...';
+  try {
+    // Envia via REST para /api/print
+    const resp = await fetch('http://localhost:3001/api/print', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ printerId: printer, orderData: { text }, printType: 'text' })
+    });
+    const data = await resp.json();
+    if (data && data.success) {
+      if (status) status.textContent = 'Texto enviado para impressão!';
+    } else {
+      if (status) status.textContent = 'Erro: ' + (data && data.error ? data.error : 'Falha ao imprimir');
+    }
+  } catch (e) {
+    if (status) status.textContent = 'Erro: ' + (e && e.message ? e.message : e);
+  }
+};
 
     // attach test buttons
     document.querySelectorAll('.printer-actions button[data-printer]').forEach(btn => {

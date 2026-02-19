@@ -8,7 +8,7 @@
   <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
   
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -16,20 +16,14 @@
   <div class="app-container">
     <aside class="sidebar">
       <div class="brand">
-        <div class="logo-icon">🖨️</div>
+        <div class="logo-icon" aria-hidden="true">H</div>
         <h2>Hub Impressão</h2>
       </div>
-      
+
       <nav class="nav-menu">
-        <button class="nav-item active" data-tab="dashboard">
-          <span class="icon">📊</span> Dashboard
-        </button>
-        <button class="nav-item" data-tab="printers">
-          <span class="icon">📠</span> Impressoras
-        </button>
-        <button class="nav-item" data-tab="logs">
-          <span class="icon">📝</span> Logs
-        </button>
+        <button class="nav-item active" data-tab="dashboard">Dashboard</button>
+        <button class="nav-item" data-tab="printers">Impressoras</button>
+        <button class="nav-item" data-tab="logs">Logs</button>
       </nav>
 
       <div class="sidebar-footer">
@@ -37,6 +31,11 @@
           <span class="pulse"></span> Sistema Online
         </div>
         <div class="version">v1.0.0</div>
+        <div class="support-block">
+          <div class="support-label">Suporte</div>
+          <a href="https://wa.me/5585984582196" class="support-link" target="_blank" rel="noopener">WhatsApp 85 98458-2196</a>
+          <a href="mailto:hubpedidos@gmail.com" class="support-link">hubpedidos@gmail.com</a>
+        </div>
       </div>
     </aside>
 
@@ -56,28 +55,26 @@
 
         <div class="stats-grid">
           <div class="stat-card">
-            <div class="icon-wrapper blue">
-              <span>🖨️</span>
+            <div class="icon-wrapper lime">
+              <span class="icon-letter">P</span>
             </div>
             <div class="stat-info">
               <span class="stat-value" id="printer-count">0</span>
               <span class="stat-label">Impressoras</span>
             </div>
           </div>
-          
           <div class="stat-card">
-            <div class="icon-wrapper green">
-              <span>⚡</span>
+            <div class="icon-wrapper lime-light">
+              <span class="icon-letter">W</span>
             </div>
             <div class="stat-info">
               <span class="stat-value" id="ws-status">Ativo</span>
               <span class="stat-label">WebSocket</span>
             </div>
           </div>
-
           <div class="stat-card">
-            <div class="icon-wrapper purple">
-              <span>🔗</span>
+            <div class="icon-wrapper lime-light">
+              <span class="icon-letter">A</span>
             </div>
             <div class="stat-info">
               <span class="stat-value">API</span>
@@ -105,12 +102,8 @@
             <p>Configure e teste seus dispositivos</p>
           </div>
           <div class="view-actions">
-            <button class="btn-primary" id="refresh-printers">
-              <span>🔄</span> Atualizar Lista
-            </button>
-            <button class="btn-secondary" id="add-printer">
-              <span>➕</span> Nova Impressora
-            </button>
+            <button class="btn-primary" id="refresh-printers">Atualizar Lista</button>
+            <button class="btn-secondary" id="add-printer">Nova Impressora</button>
           </div>
         </header>
 
@@ -121,6 +114,19 @@
               <div class="spinner"></div>
               <p>Buscando impressoras...</p>
             </div>
+          </div>
+
+          <div class="glass-panel test-panel">
+            <h3>Impressão de Texto Manual</h3>
+            <div class="test-controls">
+              <select id="manual-printer" class="custom-select">
+                <option value="">Selecione uma impressora...</option>
+              </select>
+              <button class="btn-secondary" id="btn-paste-clipboard" type="button">Colar do Clipboard</button>
+            </div>
+            <textarea id="manual-text" class="manual-textarea" rows="6" placeholder="Digite ou cole o texto para imprimir..."></textarea>
+            <button class="btn-primary" onclick="manualPrint()">Imprimir Texto</button>
+            <div id="manual-print-status" class="status-message"></div>
           </div>
 
           <div class="glass-panel test-panel">

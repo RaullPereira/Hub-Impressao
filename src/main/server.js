@@ -152,6 +152,10 @@ class Server {
 
         logger.info(`printerId: ${printerId}`);
         logger.info(`printType: ${printType}`);
+        logger.info(`[API/print] orderData:`, orderData);
+        if (orderData && orderData.text) {
+          logger.info(`[API/print] Texto recebido para impressão: ${orderData.text}`);
+        }
 
         await this.printerManager.print({ printer: printerId, orderData, printType });
 

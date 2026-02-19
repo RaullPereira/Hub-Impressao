@@ -10,6 +10,7 @@
   "scripts": {
     "start": "electron .",
     "clean": "rm -rf dist node_modules",
+    "clean:dist": "bash scripts/clean-dist.sh",
     "dev": "electron .",
     "install:mac": "npm install --no-optional",
     "install:win": "npm install",

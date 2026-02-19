@@ -103,7 +103,7 @@ class ThermalPrintApp {
       height: 700,
       icon: iconPath,
       webPreferences: {
-        preload: path.join(__dirname, '../../preload.js'),
+        preload: path.join(__dirname, '../preload.js'),
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: false
@@ -147,8 +147,8 @@ app.isQuiting = false;
 // Otimização: desabilitar aceleração de hardware se não necessário
 app.disableHardwareAcceleration();
 
-app.whenReady().then(() => {
-  thermalApp.initialize();
+app.whenReady().then(async () => {
+  await thermalApp.initialize();
 
   // Ícone no dock (macOS) — evita logo do Electron/React
   const iconPath = getAppIconPath();
@@ -244,10 +244,12 @@ app.on('activate', () => {
 });
 
 ipcMain.handle('get-printers', async () => {
+  if (!thermalApp.printerManager) return [];
   return thermalApp.printerManager.getPrinters();
 });
 
 ipcMain.handle('test-printer', async (event, printerId) => {
+  if (!thermalApp.printerManager) throw new Error('Serviço de impressoras ainda não iniciou');
   return thermalApp.printerManager.testPrint(printerId);
 });
 

@@ -89,7 +89,7 @@
       "createStartMenuShortcut": true,
       "installerIcon": "assets/icons/app.ico",
       "uninstallerIcon": "assets/icons/app.ico",
-      "include": "build/installer.nsh"
+      "include": "assets/installer.nsh"
     },
     "publish": [
       {

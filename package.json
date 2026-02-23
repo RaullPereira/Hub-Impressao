@@ -1,7 +1,7 @@
 {
   "name": "@raullpereira/hub-impressao",
   "version": "1.0.1",
-  "description": "Serviço de impressão térmica em background",
+  "description": "Serviço de impressão térmica em background (branch Win7: Electron 22)",
   "author": "Raull Pereira",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
@@ -22,6 +22,7 @@
     "build:win": "electron-builder --win --x64 --ia32",
     "build:win64": "electron-builder --win --x64",
     "build:win32": "electron-builder --win --ia32",
+    "build:win7": "electron-builder --win --x64 --ia32",
     "build": "electron-builder"
   },
   "dependencies": {
@@ -40,8 +41,8 @@
     "escpos-usb": "^3.0.0-alpha.4"
   },
   "devDependencies": {
-    "electron": "^28.0.0",
-    "electron-builder": "^24.13.3",
+    "electron": "^22.3.27",
+    "electron-builder": "^24.6.4",
     "sharp": "^0.33.5",
     "to-ico": "^1.1.5"
   },
@@ -88,8 +89,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "installerIcon": "assets/icons/app.ico",
-      "uninstallerIcon": "assets/icons/app.ico",
-      "include": "assets/installer.nsh"
+      "uninstallerIcon": "assets/icons/app.ico"
     },
     "publish": [
       {

@@ -1,8 +1,8 @@
 {
-  "name": "@raullpereira/hub-impressao",
-  "version": "1.0.1",
+  "name": "hub-impressao",
+  "version": "1.6.2",
   "description": "Serviço de impressão térmica em background",
-  "author": "Raull Pereira",
+  "author": "Pedidos Hub",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com/"
   },
@@ -20,17 +20,25 @@
     "prebuild": "npm run build:icons",
     "build:mac": "electron-builder --mac",
     "build:win": "electron-builder --win --x64 --ia32",
+    "build:win7": "node scripts/build-win7-legacy.js",
+    "build:senhas": "node scripts/build-senhas.js",
+    "build:senhas:mac": "node scripts/build-senhas.js --mac",
+    "build:senhas:all": "node scripts/build-senhas.js --all",
+    "build:senhas:win7": "node scripts/build-senhas.js --win7",
     "build:win64": "electron-builder --win --x64",
     "build:win32": "electron-builder --win --ia32",
+    "build:linux": "electron-builder --linux --x64",
     "build": "electron-builder"
   },
   "dependencies": {
+    "@supabase/supabase-js": "2.49.8",
     "cors": "^2.8.5",
     "electron-store": "^8.1.0",
     "escpos": "^3.0.0-alpha.6",
     "escpos-network": "^3.0.0-alpha.5",
     "express": "^4.18.2",
     "https": "^1.0.0",
+    "node-fetch": "^2.7.0",
     "selfsigned": "^5.5.0",
     "uuid": "^9.0.1",
     "winston": "^3.19.0",
@@ -90,6 +98,26 @@
       "installerIcon": "assets/icons/app.ico",
       "uninstallerIcon": "assets/icons/app.ico",
       "include": "assets/installer.nsh"
+    },
+    "linux": {
+      "icon": "assets/icons/app.png",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Utility",
+      "synopsis": "Serviço de impressão térmica em background",
+      "maintainer": "Pedidos Hub <suporte@pedidoshub.com.br>"
     },
     "publish": [
       {

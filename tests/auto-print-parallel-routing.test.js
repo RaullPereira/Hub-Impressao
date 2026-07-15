@@ -341,6 +341,8 @@ const order = {
       const originalGetStorePrinters = Settings.getStorePrinters;
       const statusQueries = [];
       let claimCalls = 0;
+      let queuedJobClaims = 0;
+      const queuedPrints = [];
       const listener = makeListener(PairedPrintListener, async () => {});
 
       listener.printSettings.autoPrintEnabled = true;
@@ -363,6 +365,29 @@ const order = {
 
       assert.deepStrictEqual(statusQueries, [['pending']]);
       assert.strictEqual(claimCalls, 0);
+      assert.strictEqual(listener.processedOrderIds.has(order.id), false);
+
+      listener.supabase = {};
+      listener.refreshPrintSettings = async () => {};
+      listener.isOrderAlreadyPrinted = async () => false;
+      listener.claimPrintJob = async () => {
+        queuedJobClaims += 1;
+        return { id: 'pending-job', order_id: order.id, printer_type: 'counter' };
+      };
+      listener.printWithRouting = async (_orderId, printType) => {
+        queuedPrints.push(printType);
+      };
+
+      await listener.processPrintJob({
+        id: 'pending-job',
+        order_id: order.id,
+        printer_type: 'counter',
+        created_at: new Date().toISOString()
+      }, 'realtime_insert');
+
+      assert.strictEqual(queuedJobClaims, 1);
+      assert.deepStrictEqual(queuedPrints, ['counter']);
+      assert.strictEqual(listener.processedOrderIds.has(order.id), true);
     });
 
     await test('partial print failure releases only its claim and waits for other vias', async () => {

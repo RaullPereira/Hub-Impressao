@@ -2123,8 +2123,6 @@ class PairedPrintListener {
         logger.info(
           `${this.getLogContext()} Pedido #${order.order_number || orderId} já possui print job pendente. Ignorando auto print.`
         );
-        this.processedOrderIds.add(orderId);
-        this.trimRuntimeCache(this.processedOrderIds);
         return;
       }
 

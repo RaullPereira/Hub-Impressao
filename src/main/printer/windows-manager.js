@@ -24,11 +24,7 @@ function isVirtualPrinterName(name) {
 }
 
 function isLegacyWindowsPrintMode() {
-  if (process.env.HUB_FORCE_LEGACY_TEXT_PRINT === '1') return true;
-  if (process.platform !== 'win32') return false;
-
-  const release = os.release();
-  return release.startsWith('6.0') || release.startsWith('6.1') || release.startsWith('6.2') || release.startsWith('6.3');
+  return process.env.HUB_FORCE_LEGACY_TEXT_PRINT === '1';
 }
 
 class WindowsPrinterManager {
@@ -201,15 +197,17 @@ class WindowsPrinterManager {
       } else {
         throw new Error('Nenhum conteúdo para imprimir fornecido');
       }
-      return await this._printBuffer(selectedPrinter, buf);
+      return await this._printBuffer(selectedPrinter, buf, {
+        preserveRaw: Boolean(rawContent)
+      });
     } catch (err) {
       logger.error('[print] Erro ao imprimir via win-spool:', err);
       throw err;
     }
   }
 
-  async _printBuffer(printerName, buffer) {
-    if (isLegacyWindowsPrintMode() && typeof winSpool.printText === 'function') {
+  async _printBuffer(printerName, buffer, { preserveRaw = false } = {}) {
+    if (!preserveRaw && isLegacyWindowsPrintMode() && typeof winSpool.printText === 'function') {
       try {
         const printableText = typeof winSpool.bufferToPrintableText === 'function'
           ? winSpool.bufferToPrintableText(buffer)
@@ -232,7 +230,7 @@ class WindowsPrinterManager {
       if (err && err.printOutcomeUncertain === true) throw err;
       logger.warn('[print] printRaw falhou, tentando fallback de texto/arquivo:', err.message || err);
 
-      if (typeof winSpool.printText === 'function') {
+      if (!preserveRaw && typeof winSpool.printText === 'function') {
         try {
           const printableText = typeof winSpool.bufferToPrintableText === 'function'
             ? winSpool.bufferToPrintableText(buffer)

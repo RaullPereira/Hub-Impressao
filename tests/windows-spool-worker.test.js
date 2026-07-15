@@ -557,6 +557,61 @@ async function testManagerNeverFallsBackAfterUncertainOutcome() {
   }
 }
 
+async function testOfficialRawBypassesLegacyTextConversion() {
+  const Module = require('node:module');
+  const originalLoad = Module._load;
+  Module._load = function patchedLoad(request, parent, isMain) {
+    if (request === 'electron') {
+      return { app: { getPath: () => os.tmpdir() } };
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+
+  const winSpool = require('../src/main/printer/win-spool');
+  const WindowsPrinterManager = require('../src/main/printer/windows-manager');
+  const originals = {
+    printRaw: winSpool.printRaw,
+    printText: winSpool.printText,
+    legacyMode: process.env.HUB_FORCE_LEGACY_TEXT_PRINT
+  };
+
+  try {
+    const manager = new WindowsPrinterManager();
+    const officialBytes = Buffer.from([0x1B, 0x40, 0x1B, 0x61, 0x01, 0x41, 0x0A]);
+    const rawPayloads = [];
+    let textCalls = 0;
+
+    manager.ensurePrinterAvailable = async () => 'Printer';
+    process.env.HUB_FORCE_LEGACY_TEXT_PRINT = '1';
+    winSpool.printRaw = async (_printer, payload) => {
+      rawPayloads.push(Buffer.from(payload));
+    };
+    winSpool.printText = async () => {
+      textCalls += 1;
+    };
+
+    const result = await manager.print({
+      printer: 'Printer',
+      rawContent: officialBytes.toString('base64'),
+      printType: 'counter'
+    });
+
+    assert.equal(result.mode, 'raw');
+    assert.equal(textCalls, 0, 'official RAW must never use the GDI text path');
+    assert.equal(rawPayloads.length, 1);
+    assert.deepEqual(rawPayloads[0], officialBytes);
+  } finally {
+    winSpool.printRaw = originals.printRaw;
+    winSpool.printText = originals.printText;
+    if (originals.legacyMode === undefined) {
+      delete process.env.HUB_FORCE_LEGACY_TEXT_PRINT;
+    } else {
+      process.env.HUB_FORCE_LEGACY_TEXT_PRINT = originals.legacyMode;
+    }
+    Module._load = originalLoad;
+  }
+}
+
 async function run() {
   await testConcurrentJobsReuseOneProcessAndPreserveProtocol();
   await testResponsesCorrelateOutOfOrderIncludingErrors();
@@ -573,6 +628,7 @@ async function run() {
   testPackagedScriptPathAndAsarConfig();
   testPowerShell2SourceContract();
   await testManagerNeverFallsBackAfterUncertainOutcome();
+  await testOfficialRawBypassesLegacyTextConversion();
   console.log('windows-spool-worker.test.js: ok');
 }
 

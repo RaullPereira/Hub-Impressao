@@ -1,6 +1,13 @@
 const path = require('path');
 const { spawn } = require('child_process');
 
+function resolveWindowsSpoolScriptPath(scriptPath) {
+  return String(scriptPath).replace(
+    /([\\/])app\.asar([\\/])/,
+    '$1app.asar.unpacked$2'
+  );
+}
+
 class SpoolWorkerUnavailableError extends Error {
   constructor(message, cause) {
     super(message);
@@ -22,11 +29,11 @@ class WindowsSpoolWorker {
   constructor({
     spawnFn = spawn,
     scriptPath = path.join(__dirname, 'windows-spool-worker.ps1'),
-    timeoutMs = 15000,
+    timeoutMs = 60000,
     startupTimeoutMs = 15000
   } = {}) {
     this.spawnFn = spawnFn;
-    this.scriptPath = scriptPath;
+    this.scriptPath = resolveWindowsSpoolScriptPath(scriptPath);
     this.timeoutMs = timeoutMs;
     this.startupTimeoutMs = startupTimeoutMs;
     this.child = null;
@@ -178,28 +185,28 @@ class WindowsSpoolWorker {
       entry.timer = setTimeout(() => {
         const current = this.pending.get(jobId);
         if (!current || current.settled) return;
-        this._terminateState(
-          state,
-          current.accepted
-            ? `Windows spool worker timed out after accepting job ${jobId}`
-            : `Windows spool worker write timed out before accepting job ${jobId}`
-        );
-        this._killChild(state.child);
+        const error = current.accepted
+          ? new SpoolWorkerUncertainError(`Windows spool worker timed out after accepting job ${jobId}`)
+          : new SpoolWorkerUnavailableError(`Windows spool worker write timed out before accepting job ${jobId}`);
+        this._settlePending(jobId, error);
       }, this.timeoutMs);
 
       try {
         state.child.stdin.write(protocolLine, (error) => {
-          const current = this.pending.get(jobId);
-          if (!current || current.settled) return;
-
           if (error) {
-            this._terminateState(state, `Windows spool worker could not accept job ${jobId}`, error);
+            this._terminateState(state, `Windows spool worker stdin callback failed for job ${jobId}`, error);
             this._killChild(state.child);
             return;
           }
 
+          const current = this.pending.get(jobId);
+          if (!current || current.settled) return;
           current.accepted = true;
         });
+        const current = this.pending.get(jobId);
+        if (current && !current.settled) {
+          current.accepted = true;
+        }
       } catch (error) {
         this._terminateState(state, `Windows spool worker could not accept job ${jobId}`, error);
         this._killChild(state.child);
@@ -310,5 +317,6 @@ class WindowsSpoolWorker {
 module.exports = {
   WindowsSpoolWorker,
   SpoolWorkerUnavailableError,
-  SpoolWorkerUncertainError
+  SpoolWorkerUncertainError,
+  resolveWindowsSpoolScriptPath
 };

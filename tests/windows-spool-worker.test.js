@@ -7,7 +7,8 @@ const path = require('node:path');
 const {
   WindowsSpoolWorker,
   SpoolWorkerUnavailableError,
-  SpoolWorkerUncertainError
+  SpoolWorkerUncertainError,
+  resolveWindowsSpoolScriptPath
 } = require('../src/main/printer/windows-spool-worker');
 
 class FakeStdin extends EventEmitter {
@@ -182,11 +183,10 @@ async function testStartupReadyTimeoutIsUnavailable() {
   assert.equal(worker.child, null);
 }
 
-async function testWriteFailureBeforeAcceptanceIsUnavailable() {
+async function testSynchronousWriteFailureBeforeAcceptanceIsUnavailable() {
   const harness = createHarness({
-    onWrite(line, callback) {
-      setImmediate(() => callback(new Error('broken stdin')));
-      return true;
+    onWrite() {
+      throw new Error('synchronous broken stdin');
     }
   });
   const worker = new WindowsSpoolWorker({ spawnFn: harness.spawnFn, timeoutMs: 1000 });
@@ -198,9 +198,35 @@ async function testWriteFailureBeforeAcceptanceIsUnavailable() {
   await worker.stop();
 }
 
-async function testTimeoutAfterAcceptanceIsUncertain() {
-  const harness = createHarness();
-  const worker = new WindowsSpoolWorker({ spawnFn: harness.spawnFn, timeoutMs: 10 });
+async function testWriteReturnImmediatelyMarksJobAccepted() {
+  let writeCallback;
+  const harness = createHarness({
+    onWrite(line, callback) {
+      writeCallback = callback;
+      return true;
+    }
+  });
+  const worker = new WindowsSpoolWorker({ spawnFn: harness.spawnFn, timeoutMs: 1000 });
+  const printPromise = worker.printRaw('Printer', Buffer.from('payload'));
+
+  emitLine(harness.children[0], 'READY');
+  await nextTurn();
+  const jobId = parseJobLine(harness.children[0].stdin.writes[0])[0];
+  assert.equal(worker.pending.get(jobId).accepted, true, 'successful stdin.write return is the acceptance boundary');
+  writeCallback(null);
+  emitLine(harness.children[0], `OK\t${jobId}`);
+  assert.equal(await printPromise, true);
+  await worker.stop();
+}
+
+async function testWriteCallbackFailureAfterReturnIsUncertain() {
+  const harness = createHarness({
+    onWrite(line, callback) {
+      setImmediate(() => callback(new Error('broken stdin')));
+      return true;
+    }
+  });
+  const worker = new WindowsSpoolWorker({ spawnFn: harness.spawnFn, timeoutMs: 1000 });
   const printPromise = worker.printRaw('Printer', Buffer.from('payload'));
 
   emitLine(harness.children[0], 'READY');
@@ -212,6 +238,142 @@ async function testTimeoutAfterAcceptanceIsUncertain() {
   });
   assert.equal(worker.pending.size, 0);
   await worker.stop();
+}
+
+async function testTimeoutOnlyRejectsAffectedJobAndIgnoresLateResponse() {
+  const harness = createHarness();
+  const worker = new WindowsSpoolWorker({ spawnFn: harness.spawnFn, timeoutMs: 10 });
+  const firstPromise = worker.printRaw('Printer A', Buffer.from('first'));
+
+  emitLine(harness.children[0], 'READY');
+  await nextTurn();
+  const firstId = parseJobLine(harness.children[0].stdin.writes[0])[0];
+  worker.timeoutMs = 1000;
+  const secondPromise = worker.printRaw('Printer B', Buffer.from('second'));
+  await nextTurn();
+  const secondId = parseJobLine(harness.children[0].stdin.writes[1])[0];
+
+  await assert.rejects(firstPromise, (error) => {
+    assert.equal(error instanceof SpoolWorkerUncertainError, true);
+    assert.equal(error instanceof SpoolWorkerUnavailableError, false);
+    assert.equal(error.printOutcomeUncertain, true);
+    return true;
+  });
+
+  assert.equal(harness.spawnCalls.length, 1);
+  assert.equal(harness.children[0].killed, false, 'one timed-out job must not terminate the shared worker');
+  assert.equal(worker.pending.has(secondId), true, 'unrelated printer job must remain pending');
+  emitLine(harness.children[0], `OK\t${firstId}`);
+  emitLine(
+    harness.children[0],
+    `ERR\t${firstId}\t${Buffer.from('late error', 'utf8').toString('base64')}`
+  );
+  assert.equal(worker.pending.has(secondId), true, 'late responses for timed-out jobs must be ignored');
+  emitLine(harness.children[0], `OK\t${secondId}`);
+  assert.equal(await secondPromise, true);
+  assert.equal(worker.pending.size, 0);
+  await worker.stop();
+}
+
+async function testOneShotDispatchClassification() {
+  const Module = require('node:module');
+  const originalLoad = Module._load;
+  Module._load = function patchedLoad(request, parent, isMain) {
+    if (request === 'electron') {
+      return { app: { getPath: () => os.tmpdir() } };
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  let winSpool;
+  try {
+    winSpool = require('../src/main/printer/win-spool');
+  } finally {
+    Module._load = originalLoad;
+  }
+
+  const cases = [
+    {
+      name: 'RAW',
+      run: (execFn) => winSpool.__private.printRawOneShot('Printer', Buffer.from([0x00, 0xff]), { execFn })
+    },
+    {
+      name: 'TEXT',
+      run: (execFn) => winSpool.__private.printTextOneShot('Printer', 'payload', { execFn })
+    }
+  ];
+
+  for (const oneShotCase of cases) {
+    const preDispatchError = new Error(`${oneShotCase.name} failed before dispatch`);
+    await assert.rejects(
+      oneShotCase.run(async () => {
+        throw preDispatchError;
+      }),
+      (error) => {
+        assert.equal(error, preDispatchError);
+        assert.notEqual(error.printOutcomeUncertain, true);
+        return true;
+      }
+    );
+
+    const postDispatchError = new Error(`${oneShotCase.name} process exited after dispatch`);
+    await assert.rejects(
+      oneShotCase.run(async (command, timeoutMs, { dispatchMarkerPath }) => {
+        assert.equal(typeof command, 'string');
+        assert.equal(timeoutMs >= 60000, true);
+        fs.writeFileSync(dispatchMarkerPath, 'DISPATCHING', 'ascii');
+        throw postDispatchError;
+      }),
+      (error) => {
+        assert.equal(error instanceof SpoolWorkerUncertainError, true);
+        assert.equal(error.printOutcomeUncertain, true);
+        assert.equal(error.cause, postDispatchError);
+        return true;
+      }
+    );
+
+    await assert.rejects(
+      oneShotCase.run(async (command, timeoutMs, { dispatchMarkerPath }) => {
+        fs.writeFileSync(dispatchMarkerPath, 'DISPATCHING', 'ascii');
+        return { stdout: '', stderr: 'no success marker' };
+      }),
+      (error) => {
+        assert.equal(error instanceof SpoolWorkerUncertainError, true);
+        assert.equal(error.printOutcomeUncertain, true);
+        return true;
+      }
+    );
+  }
+}
+
+function testPackagedScriptPathAndAsarConfig() {
+  const defaultWorker = new WindowsSpoolWorker();
+  assert.equal(defaultWorker.timeoutMs, 60000);
+  assert.equal(
+    resolveWindowsSpoolScriptPath('/opt/Hub/resources/app.asar/src/main/printer/windows-spool-worker.ps1'),
+    '/opt/Hub/resources/app.asar.unpacked/src/main/printer/windows-spool-worker.ps1'
+  );
+  assert.equal(
+    resolveWindowsSpoolScriptPath('C:\\Program Files\\Hub\\resources\\app.asar\\src\\main\\printer\\windows-spool-worker.ps1'),
+    'C:\\Program Files\\Hub\\resources\\app.asar.unpacked\\src\\main\\printer\\windows-spool-worker.ps1'
+  );
+  assert.equal(
+    resolveWindowsSpoolScriptPath('/workspace/src/main/printer/windows-spool-worker.ps1'),
+    '/workspace/src/main/printer/windows-spool-worker.ps1'
+  );
+  const packagedWorker = new WindowsSpoolWorker({
+    scriptPath: 'C:\\Hub\\resources\\app.asar\\src\\main\\printer\\windows-spool-worker.ps1'
+  });
+  assert.equal(
+    packagedWorker.scriptPath,
+    'C:\\Hub\\resources\\app.asar.unpacked\\src\\main\\printer\\windows-spool-worker.ps1'
+  );
+
+  const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
+  assert.equal(
+    packageJson.build.asarUnpack.includes('src/main/printer/windows-spool-worker.ps1'),
+    true,
+    'Electron Builder must unpack the PowerShell worker beside app.asar'
+  );
 }
 
 async function testExitAfterAcceptanceIsUncertain() {
@@ -400,11 +562,15 @@ async function run() {
   await testResponsesCorrelateOutOfOrderIncludingErrors();
   await testProcessFailureBeforeReadyIsUnavailable();
   await testStartupReadyTimeoutIsUnavailable();
-  await testWriteFailureBeforeAcceptanceIsUnavailable();
-  await testTimeoutAfterAcceptanceIsUncertain();
+  await testSynchronousWriteFailureBeforeAcceptanceIsUnavailable();
+  await testWriteReturnImmediatelyMarksJobAccepted();
+  await testWriteCallbackFailureAfterReturnIsUncertain();
+  await testTimeoutOnlyRejectsAffectedJobAndIgnoresLateResponse();
   await testExitAfterAcceptanceIsUncertain();
   await testProcessErrorAfterAcceptanceIsUncertain();
   await testStopRejectsPendingAndTerminatesChild();
+  await testOneShotDispatchClassification();
+  testPackagedScriptPathAndAsarConfig();
   testPowerShell2SourceContract();
   await testManagerNeverFallsBackAfterUncertainOutcome();
   console.log('windows-spool-worker.test.js: ok');

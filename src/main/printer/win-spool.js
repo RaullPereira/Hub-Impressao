@@ -7,11 +7,12 @@ const os = require('os');
 const path = require('path');
 const {
   WindowsSpoolWorker,
-  SpoolWorkerUnavailableError
+  SpoolWorkerUnavailableError,
+  SpoolWorkerUncertainError
 } = require('./windows-spool-worker');
 const COMMAND_TIMEOUT_MS = 12000;
 const REGISTRY_TIMEOUT_MS = 6000;
-const PRINT_TIMEOUT_MS = 30000;
+const PRINT_TIMEOUT_MS = 60000;
 const persistentWorker = new WindowsSpoolWorker();
 
 // C# Code for RawPrinterHelper
@@ -114,6 +115,23 @@ function execWithTimeout(command, timeout = COMMAND_TIMEOUT_MS) {
     windowsHide: true,
     maxBuffer: 1024 * 1024 * 4
   });
+}
+
+function classifyOneShotError(error, dispatchMarkerPath, mode) {
+  if (error && error.printOutcomeUncertain === true) return error;
+
+  let dispatched;
+  try {
+    dispatched = fs.existsSync(dispatchMarkerPath);
+  } catch (_) {
+    dispatched = true;
+  }
+
+  if (!dispatched) return error;
+  return new SpoolWorkerUncertainError(
+    `One-shot ${mode} print outcome is uncertain after spool dispatch`,
+    error
+  );
 }
 
 function isLegacyWindows() {
@@ -369,16 +387,18 @@ async function printFile(printerName, filePath) {
   return execWithTimeout(cmd, 15000);
 }
 
-async function printTextOneShot(printerName, text) {
+async function printTextOneShot(printerName, text, { execFn = execWithTimeout } = {}) {
   const printerFile = getTempFilePath('hub_printer_name', 'txt');
   const textFile = getTempFilePath('hub_print_text', 'txt');
   const psFile = getTempFilePath('hub_text_print_script', 'ps1');
+  const dispatchMarkerPath = getTempFilePath('hub_text_dispatch', 'marker');
 
   fs.writeFileSync(printerFile, String(printerName || ''), { encoding: 'utf8' });
   fs.writeFileSync(textFile, String(text || ''), { encoding: 'utf8' });
 
   const safePrinterFile = printerFile.replace(/\\/g, '\\\\');
   const safeTextFile = textFile.replace(/\\/g, '\\\\');
+  const safeDispatchMarkerPath = dispatchMarkerPath.replace(/\\/g, '\\\\');
 
   const psCommand = `
 $ErrorActionPreference = "Stop"
@@ -404,6 +424,7 @@ $printDoc.add_PrintPage({
     $eventArgs.HasMorePages = $false
 })
 
+[System.IO.File]::WriteAllText("${safeDispatchMarkerPath}", "DISPATCHING", [System.Text.Encoding]::ASCII)
 $printDoc.Print()
 Write-Output "SUCCESS"
 `;
@@ -411,16 +432,23 @@ Write-Output "SUCCESS"
   fs.writeFileSync(psFile, psCommand, { encoding: 'utf8' });
 
   try {
-    const { stdout, stderr } = await execWithTimeout(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psFile}"`, PRINT_TIMEOUT_MS);
+    const { stdout, stderr } = await execFn(
+      `powershell -NoProfile -ExecutionPolicy Bypass -File "${psFile}"`,
+      PRINT_TIMEOUT_MS,
+      { dispatchMarkerPath }
+    );
     if (stdout.includes('SUCCESS')) {
       return true;
     }
 
     throw new Error(stderr || stdout || 'Text printing finished without success marker');
+  } catch (error) {
+    throw classifyOneShotError(error, dispatchMarkerPath, 'TEXT');
   } finally {
     try { fs.unlinkSync(printerFile); } catch (_) { }
     try { fs.unlinkSync(textFile); } catch (_) { }
     try { fs.unlinkSync(psFile); } catch (_) { }
+    try { fs.unlinkSync(dispatchMarkerPath); } catch (_) { }
   }
 }
 
@@ -435,7 +463,7 @@ async function getPreferredPrinter() {
   return printers[0] || null;
 }
 
-async function printRawOneShot(printerName, buffer) {
+async function printRawOneShot(printerName, buffer, { execFn = execWithTimeout } = {}) {
   const csFile = path.join(os.tmpdir(), 'HubImpressao_RawHelper.cs');
   try {
     fs.writeFileSync(csFile, CS_CODE, { encoding: 'utf8' });
@@ -444,6 +472,7 @@ async function printRawOneShot(printerName, buffer) {
   }
 
   const dataFile = getTempFilePath('hub_raw_data', 'bin');
+  const dispatchMarkerPath = getTempFilePath('hub_raw_dispatch', 'marker');
   fs.writeFileSync(dataFile, buffer);
 
   // Use a cleaner path for PS
@@ -451,6 +480,7 @@ async function printRawOneShot(printerName, buffer) {
   const safeCsPath = csFile.replace(/\\/g, '\\\\');
   const safeDataPath = dataFile.replace(/\\/g, '\\\\');
   const safePrinterName = printerName.replace(/"/g, '\\"');
+  const safeDispatchMarkerPath = dispatchMarkerPath.replace(/\\/g, '\\\\');
 
   const psCommand = `
 try {
@@ -460,6 +490,7 @@ try {
     # Ignore if type already exists
 }
 
+[System.IO.File]::WriteAllText("${safeDispatchMarkerPath}", "DISPATCHING", [System.Text.Encoding]::ASCII)
 $res = [RawPrinterHelper]::SendFileToPrinter("${safePrinterName}", "${safeDataPath}")
 if ($res) { 
     Write-Output "SUCCESS" 
@@ -472,7 +503,11 @@ if ($res) {
   fs.writeFileSync(psFile, psCommand, { encoding: 'utf8' });
 
   try {
-    const { stdout, stderr } = await execWithTimeout(`powershell -NoProfile -ExecutionPolicy Bypass -File "${psFile}"`, PRINT_TIMEOUT_MS);
+    const { stdout, stderr } = await execFn(
+      `powershell -NoProfile -ExecutionPolicy Bypass -File "${psFile}"`,
+      PRINT_TIMEOUT_MS,
+      { dispatchMarkerPath }
+    );
 
     // Check for success marker first
     if (stdout.includes('SUCCESS')) {
@@ -487,11 +522,12 @@ if ($res) {
     // If no output but no error? Assume success? No, better safe.
     throw new Error('No successful output from printing script. STDOUT: ' + stdout);
 
-  } catch (err) {
-    throw err;
+  } catch (error) {
+    throw classifyOneShotError(error, dispatchMarkerPath, 'RAW');
   } finally {
     try { fs.unlinkSync(dataFile); } catch (_) { }
     try { fs.unlinkSync(psFile); } catch (_) { }
+    try { fs.unlinkSync(dispatchMarkerPath); } catch (_) { }
   }
 }
 
@@ -532,6 +568,8 @@ module.exports = {
     parseRegistryPrinters,
     parseRegistryPrinterKeys,
     parseDefaultPrinterFromRegistry,
-    bufferToPrintableText
+    bufferToPrintableText,
+    printRawOneShot,
+    printTextOneShot
   }
 };

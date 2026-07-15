@@ -62,6 +62,9 @@
       "assets/**/*",
       "package.json"
     ],
+    "asarUnpack": [
+      "src/main/printer/windows-spool-worker.ps1"
+    ],
     "extraResources": [
       {
         "from": "assets",

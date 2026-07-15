@@ -2194,23 +2194,29 @@ class PairedPrintListener {
           `${this.getLogContext()} Imprimindo pedido #${order.order_number || orderId} via ${route.printType} (fonte=${source})`
         );
 
+        const legacyPrintStartedAt = this.getPrintPerformanceNow();
+        let spoolMs = 0;
         try {
           await this.runPrintActionWithRetry(
             () => this.printWithRouting(orderId, route.printType, null, order),
             `auto print ${route.ledgerType} do pedido #${order.order_number || orderId}`
           );
+          spoolMs = this.getPrintPerformanceElapsed(legacyPrintStartedAt);
           this.emitAutoPrintTelemetry(telemetryContext, {
             via: route.ledgerType,
             outcome: 'printed',
-            claimMs
+            claimMs,
+            spoolMs
           });
           printedAnyRoute = true;
           claimedJob = null;
         } catch (printError) {
+          spoolMs = this.getPrintPerformanceElapsed(legacyPrintStartedAt);
           this.emitAutoPrintTelemetry(telemetryContext, {
             via: route.ledgerType,
             outcome: 'failed',
-            claimMs
+            claimMs,
+            spoolMs
           });
           // Print falhou — devolve a reivindicação desta via para que recovery
           // possa reprocessar.
@@ -2279,13 +2285,29 @@ class PairedPrintListener {
       return;
     }
 
-    const resolvedVias = await Promise.all(vias.map(async (via) => ({
+    const resolutionResults = await Promise.allSettled(vias.map(async (via) => ({
       ...via,
       printerId: await this.resolveAutoPrintPrinterId(via.resolveType)
     })));
 
     const availableVias = [];
-    for (const via of resolvedVias) {
+    const resolverFailures = [];
+    resolutionResults.forEach((result, index) => {
+      const configuredVia = vias[index];
+      if (result.status === 'rejected') {
+        this.emitAutoPrintTelemetry(activeTelemetry, {
+          via: configuredVia.ledgerType,
+          outcome: 'failed'
+        });
+        logger.error(
+          `${this.getLogContext()} Pedido #${order.order_number || orderId}: falha ao resolver impressora da via ${configuredVia.resolveType}:`,
+          result.reason
+        );
+        resolverFailures.push(result.reason);
+        return;
+      }
+
+      const via = result.value;
       const { printerId } = via;
       if (!printerId) {
         // Sem impressora explicita/disponivel para esta via → pula (sem fallback).
@@ -2296,12 +2318,15 @@ class PairedPrintListener {
         logger.info(
           `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.resolveType} sem impressora de auto-print disponivel. Via ignorada (sem fallback).`
         );
-        continue;
+        return;
       }
       availableVias.push(via);
-    }
+    });
 
     if (availableVias.length === 0) {
+      if (resolverFailures.length > 0) {
+        throw resolverFailures[0];
+      }
       return;
     }
 
@@ -2392,6 +2417,9 @@ class PairedPrintListener {
       if (claimFailures.length > 0) {
         throw claimFailures[0];
       }
+      if (resolverFailures.length > 0) {
+        throw resolverFailures[0];
+      }
       return;
     }
 
@@ -2479,6 +2507,9 @@ class PairedPrintListener {
     if (failedPrints.length === 0) {
       if (claimFailures.length > 0) {
         throw claimFailures[0];
+      }
+      if (resolverFailures.length > 0) {
+        throw resolverFailures[0];
       }
       return;
     }

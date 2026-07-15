@@ -3,8 +3,10 @@
 // Run: node tests/print-telemetry.test.js
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const Module = require('node:module');
 const os = require('node:os');
+const path = require('node:path');
 
 const {
   buildPrintPerformanceRecord,
@@ -16,7 +18,8 @@ const {
   formatPrintPerformanceReport,
   parsePrintPerformanceLines,
   percentile,
-  summarizePrintPerformance
+  summarizePrintPerformance,
+  summarizePrintPerformanceStream
 } = require('../scripts/print-performance-report');
 
 let passed = 0;
@@ -167,6 +170,20 @@ async function test(name, fn) {
       calculatePickupMs(order, 'realtime_update_accepted', Date.parse('2026-07-14T12:00:03.000Z')),
       1000
     );
+    const paidPixOrder = {
+      created_at: '2026-07-14T11:00:00.000Z',
+      updated_at: '2026-07-14T12:00:02.000Z',
+      payment_method: 'pix_online',
+      payment_status: 'paid'
+    };
+    assert.equal(
+      calculatePickupMs(paidPixOrder, 'realtime_update_paid', Date.parse('2026-07-14T12:00:03.000Z')),
+      1000
+    );
+    assert.equal(
+      calculatePickupMs(paidPixOrder, 'recovery', Date.parse('2026-07-14T12:00:03.000Z')),
+      1000
+    );
     assert.equal(
       calculatePickupMs(order, 'recovery_accept', Date.parse('2026-07-14T11:59:59.000Z')),
       0
@@ -242,6 +259,24 @@ async function test(name, fn) {
       'max=400ms',
       'bottlenecks: render=2, spool=2'
     ].join('\n'));
+  });
+
+  await test('streams the performance fixture into the deterministic report summary', async () => {
+    const fixturePath = path.join(__dirname, 'fixtures', 'print-performance.log');
+    const summary = await summarizePrintPerformanceStream(
+      fs.createReadStream(fixturePath, { encoding: 'utf8' })
+    );
+
+    assert.deepEqual(summary, {
+      count: 4,
+      p50: 200,
+      p95: 400,
+      max: 400,
+      bottlenecks: {
+        render: 2,
+        spool: 2
+      }
+    });
   });
 
   await test('emits one sanitized record per routed printer with one shared trace', async () => {
@@ -345,13 +380,50 @@ async function test(name, fn) {
       assert.ok(skippedRecords.every((record) => record.printer === ''));
       assert.ok(skippedRecords.every((record) => Object.hasOwn(record, 'via')));
       assert.ok(skippedRecords.every((record) => Object.hasOwn(record, 'printer')));
+
+      lines.length = 0;
+      const resolverError = new Error('kitchen resolver failed');
+      const partialPrints = [];
+      listener.traceIdFactory = () => 'trace-partial-resolver';
+      listener.resolveAutoPrintPrinterId = async (route) => {
+        if (route === 'kitchen') throw resolverError;
+        return 'Counter';
+      };
+      listener.printerManager.print = async (job) => {
+        partialPrints.push(job.printer);
+      };
+
+      await assert.rejects(
+        () => listener.autoPrintPerPrinter({
+          id: 'order-partial-resolver',
+          order_type: 'delivery',
+          created_at: '2026-07-14T12:00:00.000Z'
+        }, 'order-partial-resolver', {
+          kitchen: 'Kitchen',
+          attendance: 'Counter',
+          counter: 'Counter',
+          delivery: 'Counter'
+        }, 'realtime_insert'),
+        (error) => error === resolverError
+      );
+
+      const partialRecords = lines.map((line) => JSON.parse(line.slice('[PRINT_PERF] '.length)));
+      assert.deepEqual(partialPrints, ['Counter']);
+      assert.deepEqual(partialRecords.map((record) => [
+        record.via,
+        record.printer,
+        record.outcome
+      ]), [
+        ['kitchen', '', 'failed'],
+        ['attendance', 'Counter', 'printed']
+      ]);
     } finally {
       if (logger && originalLoggerInfo) logger.info = originalLoggerInfo;
       Module._load = originalLoad;
     }
   });
 
-  await test('records legacy vias sequentially without inventing unavailable stages', async () => {
+  await test('records the opaque legacy print action as spool time', async () => {
     const originalLoad = Module._load;
     let logger = null;
     let Settings = null;
@@ -407,12 +479,13 @@ async function test(name, fn) {
       const printedRoutes = [];
       listener.printWithRouting = async (_orderId, printType) => {
         printedRoutes.push(printType);
+        monotonicNow += 100;
       };
       listener.runPrintActionWithRetry = async (action) => action();
 
       await listener.handleAutoPrintOrder({
         id: 'order-legacy',
-        created_at: '2026-07-14T12:00:00.000Z'
+        created_at: '2026-07-14T12:00:03.000Z'
       }, 'realtime_insert');
 
       const records = lines.map((line) => JSON.parse(line.slice('[PRINT_PERF] '.length)));
@@ -423,12 +496,14 @@ async function test(name, fn) {
         ['counter', 'skipped']
       ]);
       assert.ok(records.every((record) => record.traceId === 'trace-legacy'));
-      assert.ok(records.every((record) => record.pickupMs === 3000));
+      assert.ok(records.every((record) => record.pickupMs === 0));
       assert.ok(records.every((record) => record.totalMs >= record.pickupMs));
       assert.ok(records.every((record) => record.printer === ''));
       assert.ok(records.every((record) => record.renderMs === 0));
       assert.ok(records.every((record) => record.queueWaitMs === 0));
-      assert.ok(records.every((record) => record.spoolMs === 0));
+      assert.ok(records[0].spoolMs > records[0].claimMs);
+      assert.equal(records[0].slowestStage, 'spool');
+      assert.equal(records[1].spoolMs, 0);
     } finally {
       if (logger && originalLoggerInfo) logger.info = originalLoggerInfo;
       if (Settings && originalGetStorePrinters) Settings.getStorePrinters = originalGetStorePrinters;

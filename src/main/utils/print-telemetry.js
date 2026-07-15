@@ -2,7 +2,11 @@ const { performance } = require('node:perf_hooks');
 
 const STAGES = ['pickup', 'claim', 'render', 'queueWait', 'spool'];
 const OUTCOMES = new Set(['printed', 'skipped', 'failed']);
-const ACCEPTED_SOURCES = new Set(['realtime_update_accepted', 'recovery_accept']);
+const UPDATED_AT_SOURCES = new Set([
+  'realtime_update_accepted',
+  'realtime_update_paid',
+  'recovery_accept'
+]);
 
 let traceSequence = 0;
 
@@ -20,8 +24,18 @@ function createPrintTraceId(now = Date.now()) {
   return `${toNonNegativeNumber(now).toString(36)}-${process.pid.toString(36)}-${traceSequence.toString(36)}`;
 }
 
+function isRecoveredPaidPixOrder(order, source) {
+  if (toText(source) !== 'recovery') return false;
+  const paymentMethod = toText(order?.payment_method ?? order?.paymentMethod).toLowerCase();
+  const paymentStatus = toText(order?.payment_status ?? order?.paymentStatus).toLowerCase();
+  const isPixOnline = paymentMethod === 'pix_online' || (
+    paymentMethod.includes('pix') && paymentMethod.includes('online')
+  );
+  return isPixOnline && paymentStatus === 'paid';
+}
+
 function calculatePickupMs(order, source, handlerStartedAt = Date.now()) {
-  const timestamp = ACCEPTED_SOURCES.has(toText(source))
+  const timestamp = UPDATED_AT_SOURCES.has(toText(source)) || isRecoveredPaidPixOrder(order, source)
     ? order?.updated_at ?? order?.updatedAt
     : order?.created_at ?? order?.createdAt;
   const eligibleAt = Date.parse(toText(timestamp));

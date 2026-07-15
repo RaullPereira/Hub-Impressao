@@ -2118,10 +2118,10 @@ class PairedPrintListener {
         return;
       }
 
-      const hasScheduledOrPrintedJob = await this.hasPendingOrPrintedPrintJob(orderId);
-      if (hasScheduledOrPrintedJob) {
+      const hasScheduledPrintJob = await this.hasPrintJobWithStatuses(orderId, ['pending']);
+      if (hasScheduledPrintJob) {
         logger.info(
-          `${this.getLogContext()} Pedido #${order.order_number || orderId} já possui print job pendente/impresso. Ignorando auto print.`
+          `${this.getLogContext()} Pedido #${order.order_number || orderId} já possui print job pendente. Ignorando auto print.`
         );
         this.processedOrderIds.add(orderId);
         this.trimRuntimeCache(this.processedOrderIds);

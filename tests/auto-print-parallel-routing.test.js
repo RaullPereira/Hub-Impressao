@@ -288,6 +288,83 @@ const order = {
       assert.strictEqual(listener.processedOrderIds.has(recoveredOrder.id), true);
     });
 
+    await test('legacy recovery retries only the released route after a partial failure', async () => {
+      const originalGetStorePrinters = Settings.getStorePrinters;
+      const claims = [];
+      const prints = [];
+      const released = [];
+      const statusQueries = [];
+      let counterAttempts = 0;
+      const listener = makeListener(PairedPrintListener, async () => {});
+
+      listener.printSettings.autoPrintEnabled = true;
+      listener.printSettings.autoPrintRoutes = ['kitchen', 'counter'];
+      listener.hasPrintJobWithStatuses = async (_orderId, statuses) => {
+        statusQueries.push(statuses);
+        return false;
+      };
+      listener.claimAutoPrintLedger = async (_orderId, route) => {
+        claims.push(route);
+        if (route === 'kitchen' && claims.filter((value) => value === route).length > 1) {
+          return null;
+        }
+        return { id: `claim-${route}` };
+      };
+      listener.releaseAutoPrintLedger = async (claimId) => {
+        released.push(claimId);
+      };
+      listener.printWithRouting = async (_orderId, printType) => {
+        prints.push(printType);
+        if (printType === 'counter' && counterAttempts === 0) {
+          counterAttempts += 1;
+          throw new Error('Counter printer failed');
+        }
+        if (printType === 'counter') counterAttempts += 1;
+      };
+
+      try {
+        Settings.getStorePrinters = () => null;
+        await listener.handleAutoPrintOrder(order, 'test');
+        await listener.handleAutoPrintOrder(order, 'recovery');
+      } finally {
+        Settings.getStorePrinters = originalGetStorePrinters;
+      }
+
+      assert.deepStrictEqual(statusQueries, [['pending'], ['pending']]);
+      assert.deepStrictEqual(claims, ['kitchen', 'counter', 'kitchen', 'counter']);
+      assert.deepStrictEqual(prints, ['kitchen', 'counter', 'counter']);
+      assert.deepStrictEqual(released, ['claim-counter']);
+      assert.strictEqual(counterAttempts, 2);
+    });
+
+    await test('legacy auto print remains blocked by a scheduled pending job', async () => {
+      const originalGetStorePrinters = Settings.getStorePrinters;
+      const statusQueries = [];
+      let claimCalls = 0;
+      const listener = makeListener(PairedPrintListener, async () => {});
+
+      listener.printSettings.autoPrintEnabled = true;
+      listener.printSettings.autoPrintRoutes = ['kitchen', 'counter'];
+      listener.hasPrintJobWithStatuses = async (_orderId, statuses) => {
+        statusQueries.push(statuses);
+        return true;
+      };
+      listener.claimAutoPrintLedger = async () => {
+        claimCalls += 1;
+        return { id: 'unexpected-claim' };
+      };
+
+      try {
+        Settings.getStorePrinters = () => null;
+        await listener.handleAutoPrintOrder(order, 'test');
+      } finally {
+        Settings.getStorePrinters = originalGetStorePrinters;
+      }
+
+      assert.deepStrictEqual(statusQueries, [['pending']]);
+      assert.strictEqual(claimCalls, 0);
+    });
+
     await test('partial print failure releases only its claim and waits for other vias', async () => {
       const kitchenGate = deferred();
       const counterGate = deferred();

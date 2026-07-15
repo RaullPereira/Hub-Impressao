@@ -1352,26 +1352,7 @@ class PairedPrintListener {
       return;
     }
 
-    const orderIds = eligibleOrders.map((order) => String(order.id));
-    const { data: printJobs, error: printJobsError } = await this.supabase
-      .from('print_jobs')
-      .select('order_id, status')
-      .eq('admin_client_id', this.currentPairing.adminClientId)
-      .in('order_id', orderIds);
-
-    if (printJobsError) {
-      throw printJobsError;
-    }
-
-    const printedOrderIds = new Set(
-      (printJobs || [])
-        .filter((job) => job.status === 'printed' && job.order_id)
-        .map((job) => String(job.order_id))
-    );
-
     for (const order of eligibleOrders) {
-      const orderId = String(order.id);
-      if (printedOrderIds.has(orderId)) continue;
       await this.handleAutoPrintOrder(order, 'recovery');
     }
 
@@ -1560,6 +1541,9 @@ class PairedPrintListener {
   // Reivindica atomicamente a impressão de um pedido ANTES do papel sair.
   // O índice parcial idx_print_jobs_unique_printed_order (admin_client_id, order_id WHERE status='printed')
   // garante que apenas um Hub vença a corrida — os demais recebem 23505 e abortam o print.
+  // Tradeoff intencional: se o processo cair apos o claim e antes/durante o spool,
+  // o ledger pode ficar como impresso sem papel. Priorizamos nao duplicar papel;
+  // falhas observadas liberam apenas a via afetada, com duas tentativas no fluxo abaixo.
   // Retorna a linha criada quando vence, null quando outro Hub já reivindicou.
   async claimAutoPrintLedger(orderId, printerType) {
     if (!this.supabase || !this.currentPairing?.adminClientId) return null;
@@ -2319,33 +2303,27 @@ class PairedPrintListener {
 
     const renderStartedAt = this.getPrintPerformanceNow();
     let renderMs = 0;
-    let payloads;
-    try {
-      payloads = await this.fetchRenderedPayloads(
-        orderId,
-        availableVias.map((via) => via.printType)
-      );
-      renderMs = this.getPrintPerformanceElapsed(renderStartedAt);
-    } catch (renderError) {
-      renderMs = this.getPrintPerformanceElapsed(renderStartedAt);
-      for (const via of availableVias) {
-        this.emitAutoPrintTelemetry(activeTelemetry, {
-          via: via.ledgerType,
-          printer: via.printerId,
-          outcome: 'failed',
-          renderMs
-        });
+    const renderPromise = (async () => {
+      try {
+        const payloads = await this.fetchRenderedPayloads(
+          orderId,
+          availableVias.map((via) => via.printType)
+        );
+        renderMs = this.getPrintPerformanceElapsed(renderStartedAt);
+        return payloads;
+      } catch (renderError) {
+        renderMs = this.getPrintPerformanceElapsed(renderStartedAt);
+        throw renderError;
       }
-      throw renderError;
-    }
+    })();
 
-    // Reserva todas as filas em ordem de rota antes que qualquer callback aguarde
-    // claim ou spool. Assim vias da mesma impressora reivindicam o ledger somente
-    // quando chega sua vez fisica, enquanto impressoras distintas seguem paralelas.
+    // Reserva todas as filas em ordem de rota antes de aguardar o render compartilhado.
+    // Assim pedidos posteriores nao ultrapassam este pedido na mesma impressora,
+    // enquanto impressoras distintas aguardam o mesmo render em paralelo.
     const printTasks = availableVias.map((via) => {
       const timings = {
         claimMs: 0,
-        renderMs,
+        renderMs: 0,
         queueWaitMs: 0,
         spoolMs: 0
       };
@@ -2359,6 +2337,24 @@ class PairedPrintListener {
       try {
         printTask = this.dispatchQueue.enqueue(via.printerId, async () => {
           timings.queueWaitMs = this.getPrintPerformanceElapsed(enqueuedAt);
+          let payloads;
+
+          try {
+            payloads = await renderPromise;
+            timings.renderMs = renderMs;
+          } catch (renderError) {
+            timings.renderMs = renderMs;
+            taskState.failurePhase = 'render';
+            taskState.telemetryEmitted = true;
+            this.emitAutoPrintTelemetry(activeTelemetry, {
+              via: via.ledgerType,
+              printer: via.printerId,
+              outcome: 'failed',
+              ...timings
+            });
+            throw renderError;
+          }
+
           const claimStartedAt = this.getPrintPerformanceNow();
           let claimedJob;
 

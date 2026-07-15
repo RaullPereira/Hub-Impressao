@@ -102,6 +102,7 @@ const order = {
     };
 
     const PairedPrintListener = require('../src/main/supabase/paired-print-listener');
+    const Settings = require('../src/main/config/settings');
 
     await test('same-printer second via is not claimed until the first queue task completes', async () => {
       const firstPrintGate = deferred();
@@ -177,16 +178,14 @@ const order = {
       await operation;
     });
 
-    await test('same-printer work remains FIFO across auto-print invocations', async () => {
-      const firstPrintGate = deferred();
+    await test('slower earlier render still reserves same-printer FIFO across invocations', async () => {
+      const firstRenderStarted = deferred();
+      const firstRenderGate = deferred();
       const claims = [];
       const prints = [];
       const listener = makeListener(PairedPrintListener, async (job) => {
         const label = decodePayload(job);
         prints.push(label);
-        if (label === 'via:order-1') {
-          await firstPrintGate.promise;
-        }
       });
 
       listener.resolveAutoPrintPrinterId = async () => 'Shared';
@@ -194,9 +193,15 @@ const order = {
         claims.push(`${orderId}:${route}`);
         return { id: `claim-${orderId}-${route}` };
       };
-      listener.fetchRenderedPayloads = async (orderId) => ({
-        counter: payload('counter', orderId)
-      });
+      listener.fetchRenderedPayloads = async (orderId) => {
+        if (orderId === 'order-1') {
+          firstRenderStarted.resolve();
+          await firstRenderGate.promise;
+        }
+        return {
+          counter: payload('counter', orderId)
+        };
+      };
 
       const firstOperation = listener.autoPrintPerPrinter(
         { ...order, id: 'order-1' },
@@ -204,9 +209,7 @@ const order = {
         { attendance: 'Shared' },
         'test'
       );
-      await flushMicrotasks();
-      assert.deepStrictEqual(claims, ['order-1:attendance']);
-      assert.deepStrictEqual(prints, ['via:order-1']);
+      await firstRenderStarted.promise;
 
       const secondOperation = listener.autoPrintPerPrinter(
         { ...order, id: 'order-2' },
@@ -216,10 +219,10 @@ const order = {
       );
       await flushMicrotasks();
 
-      assert.deepStrictEqual(claims, ['order-1:attendance']);
-      assert.deepStrictEqual(prints, ['via:order-1']);
+      assert.deepStrictEqual(claims, []);
+      assert.deepStrictEqual(prints, []);
 
-      firstPrintGate.resolve();
+      firstRenderGate.resolve();
       await Promise.all([firstOperation, secondOperation]);
 
       assert.deepStrictEqual(claims, [
@@ -227,6 +230,62 @@ const order = {
         'order-2:attendance'
       ]);
       assert.deepStrictEqual(prints, ['via:order-1', 'via:order-2']);
+    });
+
+    await test('recovery retries a released kitchen via without reprinting attendance', async () => {
+      const recoveredOrder = {
+        ...order,
+        id: 'order-recovery',
+        created_at: new Date().toISOString()
+      };
+      const queriedTables = [];
+      const claims = [];
+      const prints = [];
+      const listener = makeListener(PairedPrintListener, async (job) => {
+        prints.push(job.printType);
+      });
+      const originalGetStorePrinters = Settings.getStorePrinters;
+
+      listener.currentPairing.lastSeenAt = new Date(Date.now() - 60 * 1000).toISOString();
+      listener.printSettings.autoPrintEnabled = true;
+      listener.printSettings.autoPrintOnAcceptEnabled = false;
+      listener.supabase = {
+        from(table) {
+          queriedTables.push(table);
+          if (table !== 'orders') {
+            throw new Error(`Unexpected recovery query for ${table}`);
+          }
+
+          const query = {
+            select: () => query,
+            eq: () => query,
+            gte: () => query,
+            order: () => query,
+            limit: async () => ({ data: [recoveredOrder], error: null })
+          };
+          return query;
+        }
+      };
+      listener.fetchRenderedPayloads = async () => ({
+        kitchen: payload('kitchen'),
+        counter: payload('counter')
+      });
+      listener.claimAutoPrintLedger = async (_orderId, route) => {
+        claims.push(route);
+        return route === 'attendance' ? null : { id: 'released-kitchen-claim' };
+      };
+
+      try {
+        Settings.getStorePrinters = () => ({ autoPrint: autoPrintMap });
+        await listener.recoverMissedOrders();
+      } finally {
+        Settings.getStorePrinters = originalGetStorePrinters;
+      }
+
+      assert.deepStrictEqual(queriedTables, ['orders']);
+      assert.deepStrictEqual(claims, ['kitchen', 'attendance']);
+      assert.deepStrictEqual(prints, ['kitchen']);
+      assert.strictEqual(listener.processedOrderIds.has(recoveredOrder.id), true);
     });
 
     await test('partial print failure releases only its claim and waits for other vias', async () => {
@@ -297,6 +356,7 @@ const order = {
       const released = [];
       const fetchCalls = [];
       const started = [];
+      const telemetry = [];
       const listener = makeListener(PairedPrintListener, async (job) => {
         started.push(job.printer);
       });
@@ -312,6 +372,9 @@ const order = {
         fetchCalls.push({ orderId, printTypes });
         throw renderError;
       };
+      listener.emitAutoPrintTelemetry = (_context, details) => {
+        telemetry.push(details);
+      };
       await assert.rejects(
         () => listener.autoPrintPerPrinter(order, order.id, autoPrintMap, 'test'),
         (error) => error === renderError
@@ -324,6 +387,11 @@ const order = {
         orderId: 'order-1',
         printTypes: ['kitchen', 'counter']
       }]);
+      assert.deepStrictEqual(telemetry.map(({ via, outcome }) => [via, outcome]), [
+        ['kitchen', 'failed'],
+        ['attendance', 'failed']
+      ]);
+      assert.ok(telemetry.every(({ renderMs }) => renderMs >= 0));
     });
 
     await test('claim rejection does not block another printer queue', async () => {

@@ -1,9 +1,15 @@
 const Settings = require('../config/settings');
 const logger = require('../utils/logger');
+const { performance } = require('node:perf_hooks');
 const BaseWebSocketTransport = require('ws');
 const { DEFAULT_PRINT_SETTINGS } = require('../printer/pedidoshub-formatter');
 const PrinterDispatchQueue = require('../printer/printer-dispatch-queue');
 const fetchCompat = require('../utils/fetch');
+const {
+  calculatePickupMs,
+  createPrintTraceId,
+  emitPrintPerformance
+} = require('../utils/print-telemetry');
 const {
   buildLegacyAutoPrintRoutes,
   buildAutoPrintRoutesForOrder,
@@ -360,6 +366,15 @@ class PairedPrintListener {
     this.renderTimeoutMs = Number.isFinite(Number(options.renderTimeoutMs))
       ? Math.max(1000, Number(options.renderTimeoutMs))
       : 5000;
+    this.performanceNow = typeof options.performanceNow === 'function'
+      ? options.performanceNow
+      : () => performance.now();
+    this.wallClockNow = typeof options.wallClockNow === 'function'
+      ? options.wallClockNow
+      : () => Date.now();
+    this.traceIdFactory = typeof options.traceIdFactory === 'function'
+      ? options.traceIdFactory
+      : () => createPrintTraceId();
     this.supabase = null;
     this.currentPairing = this.pairingStore.getPairing();
     this.status = 'idle';
@@ -406,6 +421,61 @@ class PairedPrintListener {
     return storeName
       ? `[Pairing][${storeName}][${adminClientId}]`
       : `[Pairing][${adminClientId}]`;
+  }
+
+  getPrintPerformanceNow() {
+    try {
+      const value = Number(this.performanceNow());
+      return Number.isFinite(value) ? value : performance.now();
+    } catch {
+      return performance.now();
+    }
+  }
+
+  getPrintPerformanceElapsed(startedAt) {
+    return Math.max(0, this.getPrintPerformanceNow() - Number(startedAt || 0));
+  }
+
+  createAutoPrintTelemetryContext(order, source) {
+    try {
+      const startedAt = this.getPrintPerformanceNow();
+      const handlerStartedAt = this.wallClockNow();
+      return {
+        traceId: this.traceIdFactory(),
+        storeId: this.currentPairing?.adminClientId || null,
+        orderId: order?.id == null ? '' : String(order.id),
+        source: source == null ? '' : String(source),
+        pickupMs: calculatePickupMs(order, source, handlerStartedAt),
+        startedAt
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  emitAutoPrintTelemetry(context, details = {}) {
+    if (!context) return null;
+
+    try {
+      return emitPrintPerformance(logger, {
+        traceId: context.traceId,
+        storeId: context.storeId,
+        orderId: context.orderId,
+        via: details.via,
+        printer: details.printer,
+        source: context.source,
+        outcome: details.outcome
+      }, {
+        pickupMs: context.pickupMs,
+        claimMs: details.claimMs,
+        renderMs: details.renderMs,
+        queueWaitMs: details.queueWaitMs,
+        spoolMs: details.spoolMs,
+        totalMs: details.totalMs ?? this.getPrintPerformanceElapsed(context.startedAt)
+      });
+    } catch {
+      return null;
+    }
   }
 
   hasValidPairing(pairing) {
@@ -1877,18 +1947,31 @@ class PairedPrintListener {
     };
   }
 
-  async printRawPayload(printerId, payload, printType) {
+  async printRawPayload(printerId, payload, printType, performanceTimings = null) {
     if (!this.printerManager || typeof this.printerManager.print !== 'function') {
       throw new Error('PrinterManager indisponível no serviço local');
     }
 
-    await this.printerManager.print({
-      printer: printerId,
-      rawContent: payload.rawContent,
-      encoding: payload.encoding || 'base64',
-      useRawContent: true,
-      printType
-    });
+    const spoolStartedAt = performanceTimings ? this.getPrintPerformanceNow() : null;
+    try {
+      await this.printerManager.print({
+        printer: printerId,
+        rawContent: payload.rawContent,
+        encoding: payload.encoding || 'base64',
+        useRawContent: true,
+        printType
+      });
+    } finally {
+      if (performanceTimings && spoolStartedAt != null) {
+        try {
+          performanceTimings.spoolMs = (
+            Number(performanceTimings.spoolMs) || 0
+          ) + this.getPrintPerformanceElapsed(spoolStartedAt);
+        } catch {
+          // Telemetry must never alter the print result.
+        }
+      }
+    }
   }
 
   async printWithRouting(orderId, requestedType, job = null, orderData = null) {
@@ -1973,6 +2056,7 @@ class PairedPrintListener {
   }
 
   async handleAutoPrintOrder(order, source) {
+    const telemetryContext = this.createAutoPrintTelemetryContext(order, source);
     if (!this.currentPairing?.adminClientId) return;
     if (!order?.id) return;
     if (isManualPrintOnlyOrder(order)) {
@@ -2047,7 +2131,7 @@ class PairedPrintListener {
         // Modo per-printer: roteia cada via aplicavel apenas para sua impressora
         // explicita, reivindica o ledger por printer_type (exactly-once por via) e
         // pula vias sem impressora configurada (sem fallback para default).
-        await this.autoPrintPerPrinter(order, orderId, autoPrintMap, source);
+        await this.autoPrintPerPrinter(order, orderId, autoPrintMap, source, telemetryContext);
         this.processedOrderIds.add(orderId);
         this.trimRuntimeCache(this.processedOrderIds);
         logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId} processado para auto-print por impressora.`);
@@ -2076,8 +2160,27 @@ class PairedPrintListener {
 
       let printedAnyRoute = false;
       for (const route of legacyRoutes) {
-        claimedJob = await this.claimAutoPrintLedger(orderId, route.ledgerType);
+        const claimStartedAt = this.getPrintPerformanceNow();
+        let claimMs = 0;
+        try {
+          claimedJob = await this.claimAutoPrintLedger(orderId, route.ledgerType);
+          claimMs = this.getPrintPerformanceElapsed(claimStartedAt);
+        } catch (claimError) {
+          claimMs = this.getPrintPerformanceElapsed(claimStartedAt);
+          this.emitAutoPrintTelemetry(telemetryContext, {
+            via: route.ledgerType,
+            outcome: 'failed',
+            claimMs
+          });
+          throw claimError;
+        }
+
         if (!claimedJob) {
+          this.emitAutoPrintTelemetry(telemetryContext, {
+            via: route.ledgerType,
+            outcome: 'skipped',
+            claimMs
+          });
           logger.info(
             `${this.getLogContext()} Pedido #${order.order_number || orderId} via ${route.ledgerType} já reivindicada por outro Hub. Via ignorada.`
           );
@@ -2093,9 +2196,19 @@ class PairedPrintListener {
             () => this.printWithRouting(orderId, route.printType, null, order),
             `auto print ${route.ledgerType} do pedido #${order.order_number || orderId}`
           );
+          this.emitAutoPrintTelemetry(telemetryContext, {
+            via: route.ledgerType,
+            outcome: 'printed',
+            claimMs
+          });
           printedAnyRoute = true;
           claimedJob = null;
         } catch (printError) {
+          this.emitAutoPrintTelemetry(telemetryContext, {
+            via: route.ledgerType,
+            outcome: 'failed',
+            claimMs
+          });
           // Print falhou — devolve a reivindicação desta via para que recovery
           // possa reprocessar.
           try {
@@ -2141,7 +2254,8 @@ class PairedPrintListener {
   // imprime cada via exatamente uma vez na sua impressora explicita e PULA vias sem
   // impressora resolvida (sem fallback para default). O ledger e reivindicado por
   // printer_type para que cada via seja exactly-once de forma independente.
-  async autoPrintPerPrinter(order, orderId, autoPrintMap, source) {
+  async autoPrintPerPrinter(order, orderId, autoPrintMap, source, telemetryContext = null) {
+    const activeTelemetry = telemetryContext || this.createAutoPrintTelemetryContext(order, source);
     await this.refreshPrintersIfNeeded();
 
     const vias = buildAutoPrintRoutesForOrder(autoPrintMap, order, {
@@ -2172,6 +2286,10 @@ class PairedPrintListener {
       const { printerId } = via;
       if (!printerId) {
         // Sem impressora explicita/disponivel para esta via → pula (sem fallback).
+        this.emitAutoPrintTelemetry(activeTelemetry, {
+          via: via.ledgerType,
+          outcome: 'skipped'
+        });
         logger.info(
           `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.resolveType} sem impressora de auto-print disponivel. Via ignorada (sem fallback).`
         );
@@ -2184,31 +2302,76 @@ class PairedPrintListener {
       return;
     }
 
-    const payloads = await this.fetchRenderedPayloads(
-      orderId,
-      availableVias.map((via) => via.printType)
-    );
+    const renderStartedAt = this.getPrintPerformanceNow();
+    let renderMs = 0;
+    let payloads;
+    try {
+      payloads = await this.fetchRenderedPayloads(
+        orderId,
+        availableVias.map((via) => via.printType)
+      );
+      renderMs = this.getPrintPerformanceElapsed(renderStartedAt);
+    } catch (renderError) {
+      renderMs = this.getPrintPerformanceElapsed(renderStartedAt);
+      for (const via of availableVias) {
+        this.emitAutoPrintTelemetry(activeTelemetry, {
+          via: via.ledgerType,
+          printer: via.printerId,
+          outcome: 'failed',
+          renderMs
+        });
+      }
+      throw renderError;
+    }
 
     // Reivindica o ledger por printer_type para garantir exactly-once por via,
     // independente entre vias e entre Hubs/engines.
-    const claimResults = await Promise.allSettled(availableVias.map((via) => (
-      this.claimAutoPrintLedger(orderId, via.ledgerType)
-    )));
+    const claimResults = await Promise.allSettled(availableVias.map(async (via) => {
+      const claimStartedAt = this.getPrintPerformanceNow();
+      try {
+        const claimedJob = await this.claimAutoPrintLedger(orderId, via.ledgerType);
+        return {
+          claimedJob,
+          claimMs: this.getPrintPerformanceElapsed(claimStartedAt)
+        };
+      } catch (error) {
+        throw Object.assign(new Error('Falha ao medir claim de auto-print'), {
+          originalError: error,
+          claimMs: this.getPrintPerformanceElapsed(claimStartedAt)
+        });
+      }
+    }));
     const claimedVias = [];
     const claimFailures = [];
 
     claimResults.forEach((result, index) => {
       const via = availableVias[index];
       if (result.status === 'rejected') {
+        const claimError = result.reason?.originalError || result.reason;
+        const claimMs = result.reason?.claimMs || 0;
+        this.emitAutoPrintTelemetry(activeTelemetry, {
+          via: via.ledgerType,
+          printer: via.printerId,
+          outcome: 'failed',
+          claimMs,
+          renderMs
+        });
         logger.error(
           `${this.getLogContext()} Pedido #${order.order_number || orderId}: falha ao reivindicar via ${via.ledgerType} no ledger:`,
-          result.reason
+          claimError
         );
-        claimFailures.push(result.reason);
+        claimFailures.push(claimError);
         return;
       }
 
-      if (!result.value) {
+      if (!result.value.claimedJob) {
+        this.emitAutoPrintTelemetry(activeTelemetry, {
+          via: via.ledgerType,
+          printer: via.printerId,
+          outcome: 'skipped',
+          claimMs: result.value.claimMs,
+          renderMs
+        });
         logger.info(
           `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.ledgerType} ja reivindicada (ledger). Via ignorada para evitar duplicidade.`
         );
@@ -2217,7 +2380,8 @@ class PairedPrintListener {
 
       claimedVias.push({
         ...via,
-        claimedJob: result.value
+        claimedJob: result.value.claimedJob,
+        claimMs: result.value.claimMs
       });
     });
 
@@ -2228,23 +2392,78 @@ class PairedPrintListener {
       return;
     }
 
-    const printTasks = claimedVias.map((via) => this.dispatchQueue.enqueue(
-      via.printerId,
-      () => this.runPrintActionWithRetry(
-        () => this.printRawPayload(via.printerId, payloads[via.printType], via.printType),
-        `auto print (${via.ledgerType}) do pedido #${order.order_number || orderId}`
-      )
-    ));
-    const printResults = await Promise.allSettled(printTasks);
+    const printTasks = claimedVias.map((via) => {
+      const timings = {
+        claimMs: via.claimMs,
+        renderMs,
+        queueWaitMs: 0,
+        spoolMs: 0,
+        telemetryEmitted: false
+      };
+      const enqueuedAt = this.getPrintPerformanceNow();
+      let printTask;
+
+      try {
+        printTask = this.dispatchQueue.enqueue(via.printerId, async () => {
+          timings.queueWaitMs = this.getPrintPerformanceElapsed(enqueuedAt);
+          try {
+            await this.runPrintActionWithRetry(
+              () => this.printRawPayload(
+                via.printerId,
+                payloads[via.printType],
+                via.printType,
+                timings
+              ),
+              `auto print (${via.ledgerType}) do pedido #${order.order_number || orderId}`
+            );
+            timings.telemetryEmitted = true;
+            this.emitAutoPrintTelemetry(activeTelemetry, {
+              via: via.ledgerType,
+              printer: via.printerId,
+              outcome: 'printed',
+              ...timings
+            });
+          } catch (printError) {
+            timings.telemetryEmitted = true;
+            this.emitAutoPrintTelemetry(activeTelemetry, {
+              via: via.ledgerType,
+              printer: via.printerId,
+              outcome: 'failed',
+              ...timings
+            });
+            throw printError;
+          }
+        });
+      } catch (enqueueError) {
+        printTask = Promise.reject(enqueueError);
+      }
+
+      return {
+        via,
+        timings,
+        promise: Promise.resolve(printTask)
+      };
+    });
+    const printResults = await Promise.allSettled(printTasks.map((entry) => entry.promise));
     const failedPrints = [];
 
     printResults.forEach((result, index) => {
-      const via = claimedVias[index];
+      const { via, timings } = printTasks[index];
       if (result.status === 'fulfilled') {
         logger.info(
           `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.ledgerType} impressa em ${via.printerId}.`
         );
         return;
+      }
+
+      if (!timings.telemetryEmitted) {
+        timings.telemetryEmitted = true;
+        this.emitAutoPrintTelemetry(activeTelemetry, {
+          via: via.ledgerType,
+          printer: via.printerId,
+          outcome: 'failed',
+          ...timings
+        });
       }
 
       logger.error(

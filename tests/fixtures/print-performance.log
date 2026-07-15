@@ -1,0 +1,7 @@
+[PRINT_PERF] {"outcome":"printed","totalMs":100,"slowestStage":"render"}
+[PRINT_PERF] {"outcome":"printed","totalMs":200,"slowestStage":"render"}
+[PRINT_PERF] {"outcome":"printed","totalMs":300,"slowestStage":"spool"}
+[PRINT_PERF] {"outcome":"printed","totalMs":400,"slowestStage":"spool"}
+[PRINT_PERF] {"outcome":"failed","totalMs":900,"slowestStage":"spool"}
+ordinary log line
+[PRINT_PERF] not-json

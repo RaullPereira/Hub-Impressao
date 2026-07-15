@@ -2,6 +2,7 @@ const Settings = require('../config/settings');
 const logger = require('../utils/logger');
 const BaseWebSocketTransport = require('ws');
 const { DEFAULT_PRINT_SETTINGS } = require('../printer/pedidoshub-formatter');
+const PrinterDispatchQueue = require('../printer/printer-dispatch-queue');
 const fetchCompat = require('../utils/fetch');
 const {
   buildLegacyAutoPrintRoutes,
@@ -350,6 +351,7 @@ class PairedPrintListener {
       : null;
 
     this.printerManager = printerManager;
+    this.dispatchQueue = options.dispatchQueue || new PrinterDispatchQueue();
     this.pairingStore = options.pairingStore || createDefaultPairingStore(adminClientId);
     this.supabaseStorageKey = typeof options.storageKey === 'string' && options.storageKey.trim()
       ? options.storageKey.trim()
@@ -1516,16 +1518,13 @@ class PairedPrintListener {
   async releaseAutoPrintLedger(jobId) {
     if (!this.supabase || !jobId) return;
 
-    try {
-      await this.supabase
-        .from('print_jobs')
-        .delete()
-        .eq('id', jobId);
-    } catch (error) {
-      logger.warn(
-        `${this.getLogContext()} Falha ao reverter claim do print_job ${jobId}:`,
-        error && error.message ? error.message : error
-      );
+    const { error } = await this.supabase
+      .from('print_jobs')
+      .delete()
+      .eq('id', jobId);
+
+    if (error) {
+      throw error;
     }
   }
 
@@ -1897,33 +1896,67 @@ class PairedPrintListener {
     await this.refreshPrintersIfNeeded();
 
     if (printType === 'both') {
-      const kitchenPrinter = await this.resolveAvailablePrinterId('kitchen');
-      const counterPrinter = await this.resolveAvailablePrinterId('counter');
+      const [kitchenPrinter, counterPrinter] = await Promise.all([
+        this.resolveAvailablePrinterId('kitchen'),
+        this.resolveAvailablePrinterId('counter')
+      ]);
 
       if (!kitchenPrinter && !counterPrinter) {
         throw new Error('Nenhuma impressora configurada para auto print');
       }
 
-      if (kitchenPrinter && counterPrinter && kitchenPrinter === counterPrinter) {
+      const kitchenPrinterKey = PrinterDispatchQueue.normalizePrinterKey(kitchenPrinter);
+      const counterPrinterKey = PrinterDispatchQueue.normalizePrinterKey(counterPrinter);
+      if (kitchenPrinter && counterPrinter && kitchenPrinterKey === counterPrinterKey) {
         const combinedPayload = await this.resolvePrintPayload(orderId, 'both', job, orderData);
-        await this.printRawPayload(kitchenPrinter, combinedPayload, 'both');
+        await this.dispatchQueue.enqueue(
+          kitchenPrinter,
+          () => this.printRawPayload(kitchenPrinter, combinedPayload, 'both')
+        );
         return;
       }
 
+      const routes = [];
       if (kitchenPrinter) {
-        const kitchenPayload = await this.resolvePrintPayload(orderId, 'kitchen', job, orderData);
-        await this.printRawPayload(kitchenPrinter, kitchenPayload, 'kitchen');
+        routes.push({ printerId: kitchenPrinter, printType: 'kitchen' });
       }
-
-      if (kitchenPrinter && counterPrinter && kitchenPrinter !== counterPrinter) {
-        await delay(500);
-      }
-
       if (counterPrinter) {
-        const counterPayload = await this.resolvePrintPayload(orderId, 'counter', job, orderData);
-        await this.printRawPayload(counterPrinter, counterPayload, 'counter');
+        routes.push({ printerId: counterPrinter, printType: 'counter' });
       }
 
+      let payloads;
+      if (routes.length === 1) {
+        const route = routes[0];
+        payloads = {
+          [route.printType]: await this.resolvePrintPayload(
+            orderId,
+            route.printType,
+            job,
+            orderData
+          )
+        };
+      } else if (job && job.content && typeof job.content === 'object') {
+        const payloadEntries = await Promise.all(routes.map(async (route) => [
+          route.printType,
+          await this.resolvePrintPayload(orderId, route.printType, job, orderData)
+        ]));
+        payloads = Object.fromEntries(payloadEntries);
+      } else {
+        payloads = await this.fetchRenderedPayloads(
+          orderId,
+          routes.map((route) => route.printType)
+        );
+      }
+
+      const printTasks = routes.map((route) => this.dispatchQueue.enqueue(
+        route.printerId,
+        () => this.printRawPayload(route.printerId, payloads[route.printType], route.printType)
+      ));
+      const printResults = await Promise.allSettled(printTasks);
+      const firstFailure = printResults.find((result) => result.status === 'rejected');
+      if (firstFailure) {
+        throw firstFailure.reason;
+      }
       return;
     }
 
@@ -1933,7 +1966,10 @@ class PairedPrintListener {
     }
 
     const payload = await this.resolvePrintPayload(orderId, printType, job, orderData);
-    await this.printRawPayload(printerId, payload, printType);
+    await this.dispatchQueue.enqueue(
+      printerId,
+      () => this.printRawPayload(printerId, payload, printType)
+    );
   }
 
   async handleAutoPrintOrder(order, source) {
@@ -2062,7 +2098,14 @@ class PairedPrintListener {
         } catch (printError) {
           // Print falhou — devolve a reivindicação desta via para que recovery
           // possa reprocessar.
-          await this.releaseAutoPrintLedger(claimedJob.id);
+          try {
+            await this.releaseAutoPrintLedger(claimedJob.id);
+          } catch (releaseError) {
+            logger.warn(
+              `${this.getLogContext()} Falha ao liberar claim ${claimedJob.id} apos erro de auto-print legado:`,
+              releaseError
+            );
+          }
           claimedJob = null;
           throw printError;
         }
@@ -2119,9 +2162,14 @@ class PairedPrintListener {
       return;
     }
 
-    let previousPrinterId = null;
-    for (const via of vias) {
-      const printerId = await this.resolveAutoPrintPrinterId(via.resolveType);
+    const resolvedVias = await Promise.all(vias.map(async (via) => ({
+      ...via,
+      printerId: await this.resolveAutoPrintPrinterId(via.resolveType)
+    })));
+
+    const availableVias = [];
+    for (const via of resolvedVias) {
+      const { printerId } = via;
       if (!printerId) {
         // Sem impressora explicita/disponivel para esta via → pula (sem fallback).
         logger.info(
@@ -2129,38 +2177,103 @@ class PairedPrintListener {
         );
         continue;
       }
+      availableVias.push(via);
+    }
 
-      // Reivindica o ledger por printer_type para garantir exactly-once por via,
-      // independente entre vias e entre Hubs/engines.
-      const claimedJob = await this.claimAutoPrintLedger(orderId, via.ledgerType);
-      if (!claimedJob) {
+    if (availableVias.length === 0) {
+      return;
+    }
+
+    const payloads = await this.fetchRenderedPayloads(
+      orderId,
+      availableVias.map((via) => via.printType)
+    );
+
+    // Reivindica o ledger por printer_type para garantir exactly-once por via,
+    // independente entre vias e entre Hubs/engines.
+    const claimResults = await Promise.allSettled(availableVias.map((via) => (
+      this.claimAutoPrintLedger(orderId, via.ledgerType)
+    )));
+    const claimedVias = [];
+    const claimFailures = [];
+
+    claimResults.forEach((result, index) => {
+      const via = availableVias[index];
+      if (result.status === 'rejected') {
+        logger.error(
+          `${this.getLogContext()} Pedido #${order.order_number || orderId}: falha ao reivindicar via ${via.ledgerType} no ledger:`,
+          result.reason
+        );
+        claimFailures.push(result.reason);
+        return;
+      }
+
+      if (!result.value) {
         logger.info(
           `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.ledgerType} ja reivindicada (ledger). Via ignorada para evitar duplicidade.`
         );
-        continue;
+        return;
       }
 
-      try {
-        await this.runPrintActionWithRetry(
-          async () => {
-            if (previousPrinterId && previousPrinterId === printerId) {
-              await delay(500);
-            }
-            const payload = await this.resolvePrintPayload(orderId, via.printType, null, order);
-            await this.printRawPayload(printerId, payload, via.printType);
-            previousPrinterId = printerId;
-          },
-          `auto print (${via.ledgerType}) do pedido #${order.order_number || orderId}`
-        );
-        logger.info(
-          `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.ledgerType} impressa em ${printerId}.`
-        );
-      } catch (printError) {
-        // Devolve a reivindicacao desta via para permitir reprocessamento.
-        await this.releaseAutoPrintLedger(claimedJob.id);
-        throw printError;
+      claimedVias.push({
+        ...via,
+        claimedJob: result.value
+      });
+    });
+
+    if (claimedVias.length === 0) {
+      if (claimFailures.length > 0) {
+        throw claimFailures[0];
       }
+      return;
     }
+
+    const printTasks = claimedVias.map((via) => this.dispatchQueue.enqueue(
+      via.printerId,
+      () => this.runPrintActionWithRetry(
+        () => this.printRawPayload(via.printerId, payloads[via.printType], via.printType),
+        `auto print (${via.ledgerType}) do pedido #${order.order_number || orderId}`
+      )
+    ));
+    const printResults = await Promise.allSettled(printTasks);
+    const failedPrints = [];
+
+    printResults.forEach((result, index) => {
+      const via = claimedVias[index];
+      if (result.status === 'fulfilled') {
+        logger.info(
+          `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.ledgerType} impressa em ${via.printerId}.`
+        );
+        return;
+      }
+
+      logger.error(
+        `${this.getLogContext()} Pedido #${order.order_number || orderId}: falha ao imprimir via ${via.ledgerType} em ${via.printerId}:`,
+        result.reason
+      );
+      failedPrints.push({ via, error: result.reason });
+    });
+
+    if (failedPrints.length === 0) {
+      if (claimFailures.length > 0) {
+        throw claimFailures[0];
+      }
+      return;
+    }
+
+    const releaseResults = await Promise.allSettled(failedPrints.map(({ via }) => (
+      this.releaseAutoPrintLedger(via.claimedJob.id)
+    )));
+    releaseResults.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        logger.warn(
+          `${this.getLogContext()} Pedido #${order.order_number || orderId}: falha ao liberar claim ${failedPrints[index].via.claimedJob.id} apos erro de impressao:`,
+          result.reason
+        );
+      }
+    });
+
+    throw failedPrints[0].error;
   }
 
   /**

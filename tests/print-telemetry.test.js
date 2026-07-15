@@ -423,6 +423,88 @@ async function test(name, fn) {
     }
   });
 
+  await test('includes successful retry work in per-printer spool time', async () => {
+    const originalLoad = Module._load;
+    let logger = null;
+    let originalLoggerInfo = null;
+
+    try {
+      Module._load = function patchedLoad(request, parent, isMain) {
+        if (request === 'electron') {
+          return { app: { getPath: () => os.tmpdir() } };
+        }
+        return originalLoad.call(this, request, parent, isMain);
+      };
+
+      const PairedPrintListener = require('../src/main/supabase/paired-print-listener');
+      logger = require('../src/main/utils/logger');
+      const lines = [];
+      originalLoggerInfo = logger.info;
+      logger.info = (line) => {
+        if (String(line).startsWith('[PRINT_PERF] ')) lines.push(line);
+      };
+
+      let monotonicNow = 0;
+      let printAttempts = 0;
+      const listener = new PairedPrintListener({
+        getPrinters: () => [{ id: 'Counter' }],
+        print: async () => {
+          printAttempts += 1;
+          if (printAttempts === 1) throw new Error('first attempt failed');
+        }
+      }, {
+        adminClientId: 'store-retry',
+        performanceNow: () => {
+          monotonicNow += 10;
+          return monotonicNow;
+        },
+        wallClockNow: () => Date.parse('2026-07-14T12:00:00.000Z'),
+        traceIdFactory: () => 'trace-retry',
+        pairingStore: {
+          getPairing: () => ({ adminClientId: 'store-retry', enabled: true }),
+          savePairing: () => {},
+          updatePairing: () => {},
+          clearPairing: () => {}
+        }
+      });
+      listener.currentPairing = {
+        adminClientId: 'store-retry',
+        appBaseUrl: 'http://localhost:3000'
+      };
+      listener.resolveAutoPrintPrinterId = async () => 'Counter';
+      listener.fetchRenderedPayloads = async () => ({
+        counter: { rawContent: 'counter', encoding: 'base64' }
+      });
+      listener.claimAutoPrintLedger = async () => ({ id: 'claim-attendance' });
+      listener.runPrintActionWithRetry = async (action) => {
+        try {
+          return await action();
+        } catch {
+          monotonicNow += 500;
+          return action();
+        }
+      };
+
+      await listener.autoPrintPerPrinter({
+        id: 'order-retry',
+        order_type: 'delivery',
+        created_at: '2026-07-14T12:00:00.000Z'
+      }, 'order-retry', {
+        attendance: 'Counter'
+      }, 'realtime_insert');
+
+      const records = lines.map((line) => JSON.parse(line.slice('[PRINT_PERF] '.length)));
+      assert.equal(printAttempts, 2);
+      assert.equal(records.length, 1);
+      assert.equal(records[0].outcome, 'printed');
+      assert.ok(records[0].spoolMs >= 500);
+      assert.ok(records[0].spoolMs > records[0].queueWaitMs);
+    } finally {
+      if (logger && originalLoggerInfo) logger.info = originalLoggerInfo;
+      Module._load = originalLoad;
+    }
+  });
+
   await test('records the opaque legacy print action as spool time', async () => {
     const originalLoad = Module._load;
     let logger = null;

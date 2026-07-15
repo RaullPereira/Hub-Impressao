@@ -1950,31 +1950,18 @@ class PairedPrintListener {
     };
   }
 
-  async printRawPayload(printerId, payload, printType, performanceTimings = null) {
+  async printRawPayload(printerId, payload, printType) {
     if (!this.printerManager || typeof this.printerManager.print !== 'function') {
       throw new Error('PrinterManager indisponível no serviço local');
     }
 
-    const spoolStartedAt = performanceTimings ? this.getPrintPerformanceNow() : null;
-    try {
-      await this.printerManager.print({
-        printer: printerId,
-        rawContent: payload.rawContent,
-        encoding: payload.encoding || 'base64',
-        useRawContent: true,
-        printType
-      });
-    } finally {
-      if (performanceTimings && spoolStartedAt != null) {
-        try {
-          performanceTimings.spoolMs = (
-            Number(performanceTimings.spoolMs) || 0
-          ) + this.getPrintPerformanceElapsed(spoolStartedAt);
-        } catch {
-          // Telemetry must never alter the print result.
-        }
-      }
-    }
+    await this.printerManager.print({
+      printer: printerId,
+      rawContent: payload.rawContent,
+      encoding: payload.encoding || 'base64',
+      useRawContent: true,
+      printType
+    });
   }
 
   async printWithRouting(orderId, requestedType, job = null, orderData = null) {
@@ -2437,16 +2424,17 @@ class PairedPrintListener {
       try {
         printTask = this.dispatchQueue.enqueue(via.printerId, async () => {
           timings.queueWaitMs = this.getPrintPerformanceElapsed(enqueuedAt);
+          const retryStartedAt = this.getPrintPerformanceNow();
           try {
             await this.runPrintActionWithRetry(
               () => this.printRawPayload(
                 via.printerId,
                 payloads[via.printType],
-                via.printType,
-                timings
+                via.printType
               ),
               `auto print (${via.ledgerType}) do pedido #${order.order_number || orderId}`
             );
+            timings.spoolMs = this.getPrintPerformanceElapsed(retryStartedAt);
             timings.telemetryEmitted = true;
             this.emitAutoPrintTelemetry(activeTelemetry, {
               via: via.ledgerType,
@@ -2455,6 +2443,7 @@ class PairedPrintListener {
               ...timings
             });
           } catch (printError) {
+            timings.spoolMs = this.getPrintPerformanceElapsed(retryStartedAt);
             timings.telemetryEmitted = true;
             this.emitAutoPrintTelemetry(activeTelemetry, {
               via: via.ledgerType,

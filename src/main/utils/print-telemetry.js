@@ -49,6 +49,8 @@ function buildPrintPerformanceRecord(base = {}, timings = {}) {
   const record = {
     traceId: toText(base.traceId),
     orderId: toText(base.orderId),
+    via: toText(base.via),
+    printer: toText(base.printer),
     source: toText(base.source),
     outcome: OUTCOMES.has(base.outcome) ? base.outcome : 'printed',
     pickupMs: values.pickup,
@@ -63,19 +65,12 @@ function buildPrintPerformanceRecord(base = {}, timings = {}) {
   if (base.storeId != null && toText(base.storeId)) {
     record.storeId = toText(base.storeId);
   }
-  if (base.via != null && toText(base.via)) {
-    record.via = toText(base.via);
-  }
-  if (base.printer != null && toText(base.printer)) {
-    record.printer = toText(base.printer);
-  }
-
   return {
     traceId: record.traceId,
     ...(record.storeId ? { storeId: record.storeId } : {}),
     orderId: record.orderId,
-    ...(record.via ? { via: record.via } : {}),
-    ...(record.printer ? { printer: record.printer } : {}),
+    via: record.via,
+    printer: record.printer,
     source: record.source,
     outcome: record.outcome,
     pickupMs: record.pickupMs,
@@ -93,9 +88,12 @@ function createPrintTelemetry(base, now = () => performance.now()) {
 
   return {
     finish(timings = {}) {
+      const handlerElapsedMs = toNonNegativeNumber(now() - startedAt);
       return buildPrintPerformanceRecord(base, {
         ...timings,
-        totalMs: timings.totalMs ?? (now() - startedAt)
+        totalMs: timings.totalMs ?? (
+          toNonNegativeNumber(timings.pickupMs) + handlerElapsedMs
+        )
       });
     }
   };

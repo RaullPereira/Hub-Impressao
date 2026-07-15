@@ -471,7 +471,10 @@ class PairedPrintListener {
         renderMs: details.renderMs,
         queueWaitMs: details.queueWaitMs,
         spoolMs: details.spoolMs,
-        totalMs: details.totalMs ?? this.getPrintPerformanceElapsed(context.startedAt)
+        totalMs: details.totalMs ?? (
+          Math.max(0, Number(context.pickupMs) || 0) +
+          this.getPrintPerformanceElapsed(context.startedAt)
+        )
       });
     } catch {
       return null;

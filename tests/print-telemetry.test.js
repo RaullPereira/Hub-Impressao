@@ -59,7 +59,7 @@ async function test(name, fn) {
     });
 
     assert.equal(record.slowestStage, 'spool');
-    assert.equal(record.totalMs, 1360);
+    assert.equal(record.totalMs, 1380);
 
     const tied = buildPrintPerformanceRecord({
       traceId: 'trace-2',
@@ -124,6 +124,33 @@ async function test(name, fn) {
     assert.equal(record.slowestStage, 'claim');
     assert.equal(JSON.stringify(record).includes('Sensitive'), false);
     assert.equal(JSON.stringify(record).includes('rawContent'), false);
+  });
+
+  await test('keeps via and printer fields explicit when unresolved', () => {
+    const record = buildPrintPerformanceRecord({
+      traceId: 'trace-unresolved',
+      orderId: 'order-unresolved',
+      source: 'recovery',
+      outcome: 'skipped'
+    });
+
+    assert.deepEqual(Object.keys(record), [
+      'traceId',
+      'orderId',
+      'via',
+      'printer',
+      'source',
+      'outcome',
+      'pickupMs',
+      'claimMs',
+      'renderMs',
+      'queueWaitMs',
+      'spoolMs',
+      'totalMs',
+      'slowestStage'
+    ]);
+    assert.equal(record.via, '');
+    assert.equal(record.printer, '');
   });
 
   await test('uses the eligible timestamp and clamps invalid pickup latency', () => {
@@ -292,10 +319,32 @@ async function test(name, fn) {
       assert.deepEqual(new Set(records.map((record) => record.printer)), new Set(['Kitchen', 'Counter']));
       assert.ok(records.every((record) => record.outcome === 'printed'));
       assert.ok(records.every((record) => record.pickupMs === 1000));
+      assert.ok(records.every((record) => record.totalMs >= record.pickupMs));
       assert.ok(records.every((record) => record.renderMs >= 0));
       assert.ok(records.every((record) => record.queueWaitMs >= 0));
       assert.ok(records.every((record) => record.spoolMs >= 0));
       assert.ok(records.every((record) => !JSON.stringify(record).includes('Sensitive')));
+
+      lines.length = 0;
+      listener.traceIdFactory = () => 'trace-unresolved-printer';
+      listener.resolveAutoPrintPrinterId = async () => null;
+      await listener.autoPrintPerPrinter({
+        id: 'order-unresolved-printer',
+        order_type: 'delivery',
+        created_at: '2026-07-14T12:00:00.000Z'
+      }, 'order-unresolved-printer', {
+        kitchen: 'Kitchen',
+        attendance: 'Counter',
+        counter: 'Counter',
+        delivery: 'Counter'
+      }, 'realtime_insert');
+
+      const skippedRecords = lines.map((line) => JSON.parse(line.slice('[PRINT_PERF] '.length)));
+      assert.equal(skippedRecords.length, 2);
+      assert.ok(skippedRecords.every((record) => record.outcome === 'skipped'));
+      assert.ok(skippedRecords.every((record) => record.printer === ''));
+      assert.ok(skippedRecords.every((record) => Object.hasOwn(record, 'via')));
+      assert.ok(skippedRecords.every((record) => Object.hasOwn(record, 'printer')));
     } finally {
       if (logger && originalLoggerInfo) logger.info = originalLoggerInfo;
       Module._load = originalLoad;
@@ -375,6 +424,8 @@ async function test(name, fn) {
       ]);
       assert.ok(records.every((record) => record.traceId === 'trace-legacy'));
       assert.ok(records.every((record) => record.pickupMs === 3000));
+      assert.ok(records.every((record) => record.totalMs >= record.pickupMs));
+      assert.ok(records.every((record) => record.printer === ''));
       assert.ok(records.every((record) => record.renderMs === 0));
       assert.ok(records.every((record) => record.queueWaitMs === 0));
       assert.ok(records.every((record) => record.spoolMs === 0));

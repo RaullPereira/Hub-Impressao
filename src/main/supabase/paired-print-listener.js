@@ -2339,83 +2339,18 @@ class PairedPrintListener {
       throw renderError;
     }
 
-    // Reivindica o ledger por printer_type para garantir exactly-once por via,
-    // independente entre vias e entre Hubs/engines.
-    const claimResults = await Promise.allSettled(availableVias.map(async (via) => {
-      const claimStartedAt = this.getPrintPerformanceNow();
-      try {
-        const claimedJob = await this.claimAutoPrintLedger(orderId, via.ledgerType);
-        return {
-          claimedJob,
-          claimMs: this.getPrintPerformanceElapsed(claimStartedAt)
-        };
-      } catch (error) {
-        throw Object.assign(new Error('Falha ao medir claim de auto-print'), {
-          originalError: error,
-          claimMs: this.getPrintPerformanceElapsed(claimStartedAt)
-        });
-      }
-    }));
-    const claimedVias = [];
-    const claimFailures = [];
-
-    claimResults.forEach((result, index) => {
-      const via = availableVias[index];
-      if (result.status === 'rejected') {
-        const claimError = result.reason?.originalError || result.reason;
-        const claimMs = result.reason?.claimMs || 0;
-        this.emitAutoPrintTelemetry(activeTelemetry, {
-          via: via.ledgerType,
-          printer: via.printerId,
-          outcome: 'failed',
-          claimMs,
-          renderMs
-        });
-        logger.error(
-          `${this.getLogContext()} Pedido #${order.order_number || orderId}: falha ao reivindicar via ${via.ledgerType} no ledger:`,
-          claimError
-        );
-        claimFailures.push(claimError);
-        return;
-      }
-
-      if (!result.value.claimedJob) {
-        this.emitAutoPrintTelemetry(activeTelemetry, {
-          via: via.ledgerType,
-          printer: via.printerId,
-          outcome: 'skipped',
-          claimMs: result.value.claimMs,
-          renderMs
-        });
-        logger.info(
-          `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.ledgerType} ja reivindicada (ledger). Via ignorada para evitar duplicidade.`
-        );
-        return;
-      }
-
-      claimedVias.push({
-        ...via,
-        claimedJob: result.value.claimedJob,
-        claimMs: result.value.claimMs
-      });
-    });
-
-    if (claimedVias.length === 0) {
-      if (claimFailures.length > 0) {
-        throw claimFailures[0];
-      }
-      if (resolverFailures.length > 0) {
-        throw resolverFailures[0];
-      }
-      return;
-    }
-
-    const printTasks = claimedVias.map((via) => {
+    // Reserva todas as filas em ordem de rota antes que qualquer callback aguarde
+    // claim ou spool. Assim vias da mesma impressora reivindicam o ledger somente
+    // quando chega sua vez fisica, enquanto impressoras distintas seguem paralelas.
+    const printTasks = availableVias.map((via) => {
       const timings = {
-        claimMs: via.claimMs,
+        claimMs: 0,
         renderMs,
         queueWaitMs: 0,
-        spoolMs: 0,
+        spoolMs: 0
+      };
+      const taskState = {
+        failurePhase: null,
         telemetryEmitted: false
       };
       const enqueuedAt = this.getPrintPerformanceNow();
@@ -2424,6 +2359,39 @@ class PairedPrintListener {
       try {
         printTask = this.dispatchQueue.enqueue(via.printerId, async () => {
           timings.queueWaitMs = this.getPrintPerformanceElapsed(enqueuedAt);
+          const claimStartedAt = this.getPrintPerformanceNow();
+          let claimedJob;
+
+          try {
+            claimedJob = await this.claimAutoPrintLedger(orderId, via.ledgerType);
+            timings.claimMs = this.getPrintPerformanceElapsed(claimStartedAt);
+          } catch (claimError) {
+            timings.claimMs = this.getPrintPerformanceElapsed(claimStartedAt);
+            taskState.failurePhase = 'claim';
+            taskState.telemetryEmitted = true;
+            this.emitAutoPrintTelemetry(activeTelemetry, {
+              via: via.ledgerType,
+              printer: via.printerId,
+              outcome: 'failed',
+              ...timings
+            });
+            throw claimError;
+          }
+
+          if (!claimedJob) {
+            taskState.telemetryEmitted = true;
+            this.emitAutoPrintTelemetry(activeTelemetry, {
+              via: via.ledgerType,
+              printer: via.printerId,
+              outcome: 'skipped',
+              ...timings
+            });
+            logger.info(
+              `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.ledgerType} ja reivindicada (ledger). Via ignorada para evitar duplicidade.`
+            );
+            return 'skipped';
+          }
+
           const retryStartedAt = this.getPrintPerformanceNow();
           try {
             await this.runPrintActionWithRetry(
@@ -2435,22 +2403,61 @@ class PairedPrintListener {
               `auto print (${via.ledgerType}) do pedido #${order.order_number || orderId}`
             );
             timings.spoolMs = this.getPrintPerformanceElapsed(retryStartedAt);
-            timings.telemetryEmitted = true;
+            taskState.telemetryEmitted = true;
             this.emitAutoPrintTelemetry(activeTelemetry, {
               via: via.ledgerType,
               printer: via.printerId,
               outcome: 'printed',
               ...timings
             });
+            return 'printed';
           } catch (printError) {
             timings.spoolMs = this.getPrintPerformanceElapsed(retryStartedAt);
-            timings.telemetryEmitted = true;
+            taskState.failurePhase = 'print';
+
+            let releaseError = null;
+            for (let attempt = 1; attempt <= 2; attempt += 1) {
+              try {
+                await this.releaseAutoPrintLedger(claimedJob.id);
+                releaseError = null;
+                break;
+              } catch (error) {
+                releaseError = error;
+                logger.warn(
+                  `${this.getLogContext()} Pedido #${order.order_number || orderId}: tentativa ${attempt}/2 de liberar claim ${claimedJob.id} apos erro de impressao falhou:`,
+                  error
+                );
+              }
+            }
+
+            taskState.telemetryEmitted = true;
             this.emitAutoPrintTelemetry(activeTelemetry, {
               via: via.ledgerType,
               printer: via.printerId,
               outcome: 'failed',
               ...timings
             });
+
+            if (releaseError) {
+              taskState.failurePhase = 'release';
+              const combinedError = new AggregateError(
+                [printError, releaseError],
+                `Falha ao imprimir via ${via.ledgerType} e liberar claim ${claimedJob.id}`
+              );
+              combinedError.printError = printError;
+              combinedError.releaseError = releaseError;
+
+              logger.error(
+                `${this.getLogContext()} Pedido #${order.order_number || orderId}: erro de impressao da via ${via.ledgerType}:`,
+                printError
+              );
+              logger.error(
+                `${this.getLogContext()} Pedido #${order.order_number || orderId}: erro final ao liberar claim ${claimedJob.id}:`,
+                releaseError
+              );
+              throw combinedError;
+            }
+
             throw printError;
           }
         });
@@ -2461,23 +2468,26 @@ class PairedPrintListener {
       return {
         via,
         timings,
+        taskState,
         promise: Promise.resolve(printTask)
       };
     });
     const printResults = await Promise.allSettled(printTasks.map((entry) => entry.promise));
-    const failedPrints = [];
+    const routeFailures = [];
 
     printResults.forEach((result, index) => {
-      const { via, timings } = printTasks[index];
+      const { via, timings, taskState } = printTasks[index];
       if (result.status === 'fulfilled') {
-        logger.info(
-          `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.ledgerType} impressa em ${via.printerId}.`
-        );
+        if (result.value === 'printed') {
+          logger.info(
+            `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.ledgerType} impressa em ${via.printerId}.`
+          );
+        }
         return;
       }
 
-      if (!timings.telemetryEmitted) {
-        timings.telemetryEmitted = true;
+      if (!taskState.telemetryEmitted) {
+        taskState.telemetryEmitted = true;
         this.emitAutoPrintTelemetry(activeTelemetry, {
           via: via.ledgerType,
           printer: via.printerId,
@@ -2487,35 +2497,18 @@ class PairedPrintListener {
       }
 
       logger.error(
-        `${this.getLogContext()} Pedido #${order.order_number || orderId}: falha ao imprimir via ${via.ledgerType} em ${via.printerId}:`,
+        `${this.getLogContext()} Pedido #${order.order_number || orderId}: falha na fase ${taskState.failurePhase || 'enqueue'} da via ${via.ledgerType} em ${via.printerId}:`,
         result.reason
       );
-      failedPrints.push({ via, error: result.reason });
+      routeFailures.push(result.reason);
     });
 
-    if (failedPrints.length === 0) {
-      if (claimFailures.length > 0) {
-        throw claimFailures[0];
-      }
-      if (resolverFailures.length > 0) {
-        throw resolverFailures[0];
-      }
-      return;
+    if (routeFailures.length > 0) {
+      throw routeFailures[0];
     }
-
-    const releaseResults = await Promise.allSettled(failedPrints.map(({ via }) => (
-      this.releaseAutoPrintLedger(via.claimedJob.id)
-    )));
-    releaseResults.forEach((result, index) => {
-      if (result.status === 'rejected') {
-        logger.warn(
-          `${this.getLogContext()} Pedido #${order.order_number || orderId}: falha ao liberar claim ${failedPrints[index].via.claimedJob.id} apos erro de impressao:`,
-          result.reason
-        );
-      }
-    });
-
-    throw failedPrints[0].error;
+    if (resolverFailures.length > 0) {
+      throw resolverFailures[0];
+    }
   }
 
   /**

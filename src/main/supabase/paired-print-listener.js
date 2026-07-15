@@ -701,6 +701,8 @@ class PairedPrintListener {
   }
 
   isRetriablePrintError(error) {
+    if (error?.printOutcomeUncertain === true) return false;
+
     const message = String(error && error.message ? error.message : error || '').toLowerCase();
     return [
       'renderizar impressao',
@@ -1223,6 +1225,10 @@ class PairedPrintListener {
   }
 
   scheduleReconnect(reason, connectionAttemptId = this.connectionAttemptId) {
+    if (reason?.printOutcomeUncertain === true) {
+      return;
+    }
+
     if (this.isStopping || connectionAttemptId !== this.connectionAttemptId) {
       return;
     }
@@ -2189,15 +2195,18 @@ class PairedPrintListener {
             claimMs,
             spoolMs
           });
-          // Print falhou — devolve a reivindicação desta via para que recovery
-          // possa reprocessar.
-          try {
-            await this.releaseAutoPrintLedger(claimedJob.id);
-          } catch (releaseError) {
-            logger.warn(
-              `${this.getLogContext()} Falha ao liberar claim ${claimedJob.id} apos erro de auto-print legado:`,
-              releaseError
-            );
+
+          if (printError?.printOutcomeUncertain !== true) {
+            // Falha comprovada devolve a reivindicacao para recovery. Resultado
+            // incerto mantem o claim conservador para evitar papel duplicado.
+            try {
+              await this.releaseAutoPrintLedger(claimedJob.id);
+            } catch (releaseError) {
+              logger.warn(
+                `${this.getLogContext()} Falha ao liberar claim ${claimedJob.id} apos erro de auto-print legado:`,
+                releaseError
+              );
+            }
           }
           claimedJob = null;
           throw printError;
@@ -2410,6 +2419,17 @@ class PairedPrintListener {
           } catch (printError) {
             timings.spoolMs = this.getPrintPerformanceElapsed(retryStartedAt);
             taskState.failurePhase = 'print';
+
+            if (printError?.printOutcomeUncertain === true) {
+              taskState.telemetryEmitted = true;
+              this.emitAutoPrintTelemetry(activeTelemetry, {
+                via: via.ledgerType,
+                printer: via.printerId,
+                outcome: 'failed',
+                ...timings
+              });
+              throw printError;
+            }
 
             let releaseError = null;
             for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -2626,6 +2646,16 @@ class PairedPrintListener {
           `print job ${jobId}`
         );
       } catch (printError) {
+        if (printError?.printOutcomeUncertain === true) {
+          // O claim ja marcou o job como impresso. Como o spool pode ter aceitado
+          // o papel, preserva o status e os guards de memoria para nao reprocessar.
+          this.processedOrderIds.add(orderId);
+          this.trimRuntimeCache(this.processedOrderIds);
+          this.processedJobIds.add(jobId);
+          this.trimRuntimeCache(this.processedJobIds);
+          throw printError;
+        }
+
         // Erro recuperável volta para pending: o watchdog tenta novamente dentro
         // da janela curta de recuperação. Erro definitivo vira failed.
         const nextStatus = this.isRetriablePrintError(printError) ? 'pending' : 'failed';

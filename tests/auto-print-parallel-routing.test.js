@@ -350,6 +350,57 @@ const order = {
       }]);
     });
 
+    await test('uncertain spool timeout preserves its claim while sibling routes settle', async () => {
+      const counterGate = deferred();
+      const uncertainError = new Error('Spool timeout after dispatch');
+      uncertainError.printOutcomeUncertain = true;
+      const attempts = [];
+      const completed = [];
+      const released = [];
+      const telemetry = [];
+      const listener = makeListener(PairedPrintListener, async (job) => {
+        attempts.push(job.printer);
+        if (job.printer === 'Kitchen') throw uncertainError;
+        await counterGate.promise;
+        completed.push(job.printer);
+      });
+
+      listener.claimAutoPrintLedger = async (_orderId, route) => ({ id: `claim-${route}` });
+      listener.releaseAutoPrintLedger = async (claimId) => {
+        released.push(claimId);
+      };
+      listener.fetchRenderedPayloads = async () => ({
+        kitchen: payload('kitchen'),
+        counter: payload('counter')
+      });
+      listener.emitAutoPrintTelemetry = (_context, details) => {
+        telemetry.push(details);
+      };
+
+      let operationSettled = false;
+      const operation = listener.autoPrintPerPrinter(order, order.id, autoPrintMap, 'test');
+      operation.then(
+        () => { operationSettled = true; },
+        () => { operationSettled = true; }
+      );
+
+      await flushMicrotasks();
+      assert.deepStrictEqual(new Set(attempts), new Set(['Kitchen', 'Counter']));
+      assert.deepStrictEqual(released, []);
+      assert.strictEqual(operationSettled, false, 'operation must wait for the sibling route');
+
+      counterGate.resolve();
+      await assert.rejects(operation, (error) => error === uncertainError);
+
+      assert.deepStrictEqual(completed, ['Counter']);
+      assert.strictEqual(attempts.filter((printer) => printer === 'Kitchen').length, 1);
+      assert.deepStrictEqual(released, []);
+      assert.deepStrictEqual(
+        telemetry.filter(({ via }) => via === 'kitchen').map(({ outcome }) => outcome),
+        ['failed']
+      );
+    });
+
     await test('render failure happens before claims and dispatch', async () => {
       const renderError = new Error('official render failed');
       const claims = [];

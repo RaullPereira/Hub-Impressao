@@ -214,7 +214,7 @@ class SecureWebSocketServer {
           ws.send(JSON.stringify({
             type: 'connected',
             message: 'Conectado ao serviço de impressão',
-            version: '1.9.2'
+            version: '1.9.3'
           }));
         });
       } catch (error) {

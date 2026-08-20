@@ -182,6 +182,13 @@ function isRecoveredPrintJobTooOld(job) {
   });
 }
 
+function isMissingClaimRpc(error) {
+  const code = String(error?.code || '');
+  const message = String(error?.message || '');
+  return code === 'PGRST202' || code === '42883' ||
+    /claim_auto_print_job.*(does not exist|not found|schema cache)/i.test(message);
+}
+
 function normalizeAppBaseUrl(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -1560,6 +1567,21 @@ class PairedPrintListener {
   // Retorna a linha criada quando vence, null quando outro Hub já reivindicou.
   async claimAutoPrintLedger(orderId, printerType) {
     if (!this.supabase || !this.currentPairing?.adminClientId) return null;
+
+    const { data: rpcData, error: rpcError } = await this.supabase.rpc('claim_auto_print_job', {
+      p_admin_client_id: this.currentPairing.adminClientId,
+      p_order_id: orderId,
+      p_printer_type: printerType
+    });
+
+    if (!rpcError) {
+      const claimed = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+      return claimed || null;
+    }
+
+    if (!isMissingClaimRpc(rpcError)) {
+      throw rpcError;
+    }
 
     const { data, error } = await this.supabase
       .from('print_jobs')

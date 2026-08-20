@@ -184,9 +184,12 @@ function isRecoveredPrintJobTooOld(job) {
 
 function isMissingClaimRpc(error) {
   const code = String(error?.code || '');
-  const message = String(error?.message || '');
-  return code === 'PGRST202' || code === '42883' ||
-    /claim_auto_print_job.*(does not exist|not found|schema cache)/i.test(message);
+  const details = [error?.message, error?.details, error?.hint]
+    .filter(Boolean)
+    .join(' ');
+  const identifiesMissingClaimRpc = /claim_auto_print_job/i.test(details) &&
+    /(does not exist|not found|schema cache)/i.test(details);
+  return code === 'PGRST202' || identifiesMissingClaimRpc;
 }
 
 function normalizeAppBaseUrl(value) {
@@ -1559,8 +1562,9 @@ class PairedPrintListener {
   }
 
   // Reivindica atomicamente a impressão de um pedido ANTES do papel sair.
-  // O índice parcial idx_print_jobs_unique_printed_order (admin_client_id, order_id WHERE status='printed')
-  // garante que apenas um Hub vença a corrida — os demais recebem 23505 e abortam o print.
+  // O índice parcial idx_print_jobs_unique_printed_order_type usa
+  // (admin_client_id, order_id, COALESCE(printer_type, 'counter')) WHERE status='printed'
+  // para que apenas um Hub vença por via — os demais recebem 23505 e abortam o print.
   // Tradeoff intencional: se o processo cair apos o claim e antes/durante o spool,
   // o ledger pode ficar como impresso sem papel. Priorizamos nao duplicar papel;
   // falhas observadas liberam apenas a via afetada, com duas tentativas no fluxo abaixo.
@@ -2149,9 +2153,18 @@ class PairedPrintListener {
           source,
           telemetryContext
         );
+        if (perPrinterOutcome === 'retry') {
+          return { outcome: 'retry', reason: 'configured_route_unavailable' };
+        }
+        if (perPrinterOutcome === 'attention') {
+          return { outcome: 'attention', reason: 'configured_route_unavailable' };
+        }
         this.processedOrderIds.add(orderId);
         this.trimRuntimeCache(this.processedOrderIds);
         logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId} processado para auto-print por impressora.`);
+        if (perPrinterOutcome === 'already_claimed') {
+          return { outcome: 'skipped', reason: 'already_claimed' };
+        }
         if (perPrinterOutcome !== 'printed') {
           return { outcome: 'skipped', reason: 'no_printed_routes' };
         }
@@ -2237,13 +2250,30 @@ class PairedPrintListener {
           if (printError?.printOutcomeUncertain !== true) {
             // Falha comprovada devolve a reivindicacao para recovery. Resultado
             // incerto mantem o claim conservador para evitar papel duplicado.
-            try {
-              await this.releaseAutoPrintLedger(claimedJob.id);
-            } catch (releaseError) {
-              logger.warn(
-                `${this.getLogContext()} Falha ao liberar claim ${claimedJob.id} apos erro de auto-print legado:`,
-                releaseError
+            let releaseError = null;
+            for (let attempt = 1; attempt <= 2; attempt += 1) {
+              try {
+                await this.releaseAutoPrintLedger(claimedJob.id);
+                releaseError = null;
+                break;
+              } catch (error) {
+                releaseError = error;
+                logger.warn(
+                  `${this.getLogContext()} Pedido #${order.order_number || orderId}: tentativa ${attempt}/2 de liberar claim ${claimedJob.id} apos erro de auto-print legado falhou:`,
+                  error
+                );
+              }
+            }
+
+            if (releaseError) {
+              const combinedError = new AggregateError(
+                [printError, releaseError],
+                `Falha ao imprimir via ${route.ledgerType} e liberar claim ${claimedJob.id}`
               );
+              combinedError.printError = printError;
+              combinedError.releaseError = releaseError;
+              combinedError.preventAutoPrintReconnect = true;
+              throw combinedError;
             }
           }
           claimedJob = null;
@@ -2270,6 +2300,9 @@ class PairedPrintListener {
         error
       );
       if (error?.printOutcomeUncertain === true) {
+        return { outcome: 'attention', error };
+      }
+      if (error?.preventAutoPrintReconnect === true) {
         return { outcome: 'attention', error };
       }
       if (this.isRetriablePrintError(error)) {
@@ -2316,6 +2349,7 @@ class PairedPrintListener {
 
     const availableVias = [];
     const resolverFailures = [];
+    const unavailableVias = [];
     resolutionResults.forEach((result, index) => {
       const configuredVia = vias[index];
       if (result.status === 'rejected') {
@@ -2334,24 +2368,27 @@ class PairedPrintListener {
       const via = result.value;
       const { printerId } = via;
       if (!printerId) {
-        // Sem impressora explicita/disponivel para esta via → pula (sem fallback).
+        // A via chegou aqui por estar configurada no auto-print; sem resolucao
+        // agora significa indisponibilidade temporaria, nao ausencia de rota.
         this.emitAutoPrintTelemetry(activeTelemetry, {
           via: via.ledgerType,
-          outcome: 'skipped'
+          outcome: 'failed'
         });
         logger.info(
-          `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.resolveType} sem impressora de auto-print disponivel. Via ignorada (sem fallback).`
+          `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.resolveType} configurada, mas indisponivel para auto-print. Via mantida para recovery.`
         );
+        unavailableVias.push(via);
         return;
       }
       availableVias.push(via);
     });
 
     if (availableVias.length === 0) {
-      if (resolverFailures.length > 0) {
-        throw resolverFailures[0];
+      const resolverError = resolverFailures.find(Boolean);
+      if (resolverError) {
+        throw resolverError;
       }
-      return 'skipped';
+      return unavailableVias.length > 0 ? 'retry' : 'skipped';
     }
 
     const renderStartedAt = this.getPrintPerformanceNow();
@@ -2566,12 +2603,14 @@ class PairedPrintListener {
     if (routeFailures.length > 0) {
       throw routeFailures[0];
     }
-    if (resolverFailures.length > 0) {
-      throw resolverFailures[0];
+    const resolverError = resolverFailures.find(Boolean);
+    if (resolverError) {
+      throw resolverError;
     }
+    if (unavailableVias.length > 0) return 'retry';
     return printResults.some((result) => result.status === 'fulfilled' && result.value === 'printed')
       ? 'printed'
-      : 'skipped';
+      : 'already_claimed';
   }
 
   /**

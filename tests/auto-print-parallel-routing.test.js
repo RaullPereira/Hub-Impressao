@@ -261,8 +261,9 @@ const order = {
             eq: () => query,
             gte: () => query,
             lte: () => query,
+            or: () => query,
             order: () => query,
-            range: async () => ({ data: [recoveredOrder], error: null })
+            limit: async () => ({ data: [recoveredOrder], error: null })
           };
           return query;
         }

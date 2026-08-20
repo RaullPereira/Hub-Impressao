@@ -96,6 +96,9 @@ function makeSupabaseMock({ jobs = [], orders = [] } = {}) {
           ctx.filters.push({ type: 'lte', column, value });
           return builder;
         },
+        or() {
+          return builder;
+        },
         in(column, values) {
           ctx.inFilters.push({ column, values: values.map(String) });
           return builder;

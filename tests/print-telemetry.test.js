@@ -376,7 +376,7 @@ async function test(name, fn) {
 
       const skippedRecords = lines.map((line) => JSON.parse(line.slice('[PRINT_PERF] '.length)));
       assert.equal(skippedRecords.length, 2);
-      assert.ok(skippedRecords.every((record) => record.outcome === 'skipped'));
+      assert.ok(skippedRecords.every((record) => record.outcome === 'failed'));
       assert.ok(skippedRecords.every((record) => record.printer === ''));
       assert.ok(skippedRecords.every((record) => Object.hasOwn(record, 'via')));
       assert.ok(skippedRecords.every((record) => Object.hasOwn(record, 'printer')));

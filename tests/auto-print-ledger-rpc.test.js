@@ -130,6 +130,28 @@ function makeRpcMissingSupabase({ insertErrorCode = null } = {}) {
 
       assert.equal(await listener.claimAutoPrintLedger('order-1', 'attendance'), null);
     });
+
+    await test('42883 for another function never falls back to insert', async () => {
+      let insertCalls = 0;
+      const rpcError = {
+        code: '42883',
+        message: 'function public.some_other_function(uuid) does not exist'
+      };
+      const listener = makeListener(PairedPrintListener, {
+        rpc: async () => ({ data: null, error: rpcError }),
+        from: () => ({
+          insert: () => {
+            insertCalls += 1;
+          }
+        })
+      });
+
+      await assert.rejects(
+        () => listener.claimAutoPrintLedger('order-1', 'attendance'),
+        (error) => error === rpcError
+      );
+      assert.equal(insertCalls, 0);
+    });
   } catch (error) {
     failed += 1;
     console.error('FAIL  test setup');

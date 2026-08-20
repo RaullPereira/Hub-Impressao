@@ -125,7 +125,7 @@ function makeListener(printerMap) {
       attendance: 'Attendance'
     }, 'recovery');
 
-    check('nenhuma via disponivel nao e contada como impressa', result, 'skipped');
+    check('nenhuma via temporariamente indisponivel permanece para recovery', result, 'retry');
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

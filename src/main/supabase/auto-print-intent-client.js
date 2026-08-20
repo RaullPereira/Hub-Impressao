@@ -1,7 +1,15 @@
 'use strict';
 
-function isMissingAutoPrintIntentRpc(error) {
-  return error?.code === 'PGRST202' || error?.code === '42883';
+function isMissingAutoPrintIntentRpc(error, rpcName) {
+  if (error?.code !== 'PGRST202' && error?.code !== '42883') return false;
+
+  const diagnostic = [error?.message, error?.details, error?.hint]
+    .filter((value) => typeof value === 'string')
+    .join(' ')
+    .toLowerCase();
+  const name = String(rpcName || '').toLowerCase();
+
+  return Boolean(name) && diagnostic.includes(name) && /(?:not found|does not exist|schema cache|could not find|missing)/.test(diagnostic);
 }
 
 class AutoPrintIntentClient {
@@ -14,7 +22,7 @@ class AutoPrintIntentClient {
     if (!this.available) return [];
 
     const { data, error } = await this.supabase.rpc(name, args);
-    if (isMissingAutoPrintIntentRpc(error)) {
+    if (isMissingAutoPrintIntentRpc(error, name)) {
       this.available = false;
       return [];
     }

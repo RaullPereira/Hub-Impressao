@@ -72,11 +72,34 @@ function makeListener() {
       autoPrint: { kitchen: 'Kitchen', attendance: 'Attendance' }
     });
 
-    const initial = await listener.handleAutoPrintOrder(order, 'realtime_insert');
+    const settlements = [];
+    const intentBatches = [
+      [{ id: 'intent-retry', order_id: order.id, lease_token: 'lease-retry', attempt_count: 2 }],
+      [{ id: 'intent-attention', order_id: order.id, lease_token: 'lease-attention', attempt_count: 3 }]
+    ];
+    listener.autoPrintIntentClient = {
+      claim: async () => intentBatches.shift() || [],
+      settle: async (id, leaseToken, outcome, lastError) => {
+        settlements.push({ id, leaseToken, outcome, lastError });
+      }
+    };
+    listener.loadOrderById = async () => order;
 
-    assert.equal(initial.outcome, 'retry');
+    await listener.processAutoPrintIntents();
+
+    assert.deepEqual(settlements, [{
+      id: 'intent-retry',
+      leaseToken: 'lease-retry',
+      outcome: 'retry',
+      lastError: null
+    }]);
     assert.equal(listener.processedOrderIds.has(order.id), false);
     assert.deepEqual(printed, ['counter']);
+
+    await listener.processAutoPrintIntents();
+
+    assert.equal(settlements[1].outcome, 'attention');
+    assert.deepEqual(printed, ['counter'], 'the ledger skips the route already printed on retries');
 
     kitchenAvailable = true;
     listener.currentPairing.lastSeenAt = new Date(Date.now() - 60_000).toISOString();

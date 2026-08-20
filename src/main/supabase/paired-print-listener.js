@@ -1039,7 +1039,9 @@ class PairedPrintListener {
           }
         }
       });
-      this.autoPrintIntentClient = new AutoPrintIntentClient(this.supabase);
+      if (!this.autoPrintIntentClient) {
+        this.autoPrintIntentClient = new AutoPrintIntentClient(this.supabase);
+      }
       patchRealtimeConnect(this.supabase?.realtime);
 
       if (this.supabase.auth && typeof this.supabase.auth.onAuthStateChange === 'function') {
@@ -2249,9 +2251,6 @@ class PairedPrintListener {
           telemetryContext
         );
         if (perPrinterOutcome === 'retry') {
-          if (source === 'durable_intent') {
-            return { outcome: 'attention', reason: 'no_printer_route' };
-          }
           return { outcome: 'retry', reason: 'configured_route_unavailable' };
         }
         if (perPrinterOutcome === 'attention') {

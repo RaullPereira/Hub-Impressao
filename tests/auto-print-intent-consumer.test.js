@@ -60,7 +60,10 @@ async function test(name, fn) {
       const client = new AutoPrintIntentClient({
         rpc: async () => {
           calls += 1;
-          return { data: null, error: { code, message: 'not found' } };
+          return {
+            data: null,
+            error: { code, message: `function ${'claim_auto_print_intents'} not found in schema cache` }
+          };
         }
       });
 
@@ -78,6 +81,19 @@ async function test(name, fn) {
     });
 
     await assert.rejects(() => client.claim('store-1', 'hub-1'), rpcError);
+    assert.equal(client.available, true);
+  });
+
+  await test('a missing error for another symbol never disables this RPC consumer', async () => {
+    const rpcError = {
+      code: '42883',
+      message: 'function public.some_other_function(uuid) does not exist'
+    };
+    const client = new AutoPrintIntentClient({
+      rpc: async () => ({ data: null, error: rpcError })
+    });
+
+    await assert.rejects(() => client.claim('store-1', 'hub-1'), (error) => error === rpcError);
     assert.equal(client.available, true);
   });
 

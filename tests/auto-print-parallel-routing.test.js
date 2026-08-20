@@ -260,8 +260,9 @@ const order = {
             select: () => query,
             eq: () => query,
             gte: () => query,
+            lte: () => query,
             order: () => query,
-            limit: async () => ({ data: [recoveredOrder], error: null })
+            range: async () => ({ data: [recoveredOrder], error: null })
           };
           return query;
         }

@@ -18,6 +18,7 @@ const {
   normalizeAutoPrintRoute
 } = require('../print-routes');
 const { calculateRecoveryWindow } = require('./recovery-window');
+const { fetchRecoveryOrders } = require('./recovery-orders');
 
 const HEARTBEAT_INTERVAL_MS = 15000;
 const WATCHDOG_INTERVAL_MS = 20000;
@@ -1304,20 +1305,15 @@ class PairedPrintListener {
       defaultLookbackMs: RECOVERY_LOOKBACK_MS,
       maxAutomaticAgeMs: AUTO_PRINT_RECOVERY_MAX_AGE_MS
     });
-    const sinceIso = recoveryWindow.sinceIso;
-    logger.info(`${this.getLogContext()} Recuperando pedidos desde ${sinceIso}`);
+    logger.info(`${this.getLogContext()} Recuperando pedidos desde ${recoveryWindow.sinceIso}`);
 
-    const { data: recentOrders, error } = await this.supabase
-      .from('orders')
-      .select('*')
-      .eq('admin_client_id', this.currentPairing.adminClientId)
-      .gte('created_at', sinceIso)
-      .order('created_at', { ascending: true })
-      .limit(50);
-
-    if (error) {
-      throw error;
-    }
+    const { orders: recentOrders, pageCount } = await fetchRecoveryOrders({
+      supabase: this.supabase,
+      adminClientId: this.currentPairing.adminClientId,
+      sinceIso: recoveryWindow.sinceIso,
+      untilIso: recoveryWindow.untilIso,
+      pageSize: 50
+    });
 
     const eligibleOrders = (recentOrders || []).filter((order) => {
       if (!order?.id) return false;
@@ -1345,14 +1341,30 @@ class PairedPrintListener {
       return true;
     });
 
-    if (!eligibleOrders.length) {
-      this.touchHeartbeat();
-      return;
+    const resultCounts = {
+      printed: 0,
+      skipped: 0,
+      retry: 0,
+      attention: 0
+    };
+    for (const order of eligibleOrders) {
+      const result = await this.handleAutoPrintOrder(order, 'recovery');
+      const outcome = result?.outcome;
+      if (Object.prototype.hasOwnProperty.call(resultCounts, outcome)) {
+        resultCounts[outcome] += 1;
+      } else {
+        resultCounts.attention += 1;
+      }
     }
 
-    for (const order of eligibleOrders) {
-      await this.handleAutoPrintOrder(order, 'recovery');
-    }
+    logger.info(`${this.getLogContext()} [PRINT_RECOVERY] ${JSON.stringify({
+      sinceIso: recoveryWindow.sinceIso,
+      untilIso: recoveryWindow.untilIso,
+      pageCount,
+      found: recentOrders.length,
+      eligible: eligibleOrders.length,
+      results: resultCounts
+    })}`);
 
     this.lastRecoveryRunAt = Date.now();
     this.touchHeartbeat();
@@ -2029,29 +2041,31 @@ class PairedPrintListener {
 
   async handleAutoPrintOrder(order, source) {
     const telemetryContext = this.createAutoPrintTelemetryContext(order, source);
-    if (!this.currentPairing?.adminClientId) return;
-    if (!order?.id) return;
+    if (!this.currentPairing?.adminClientId) return { outcome: 'skipped', reason: 'not_paired' };
+    if (!order?.id) return { outcome: 'skipped', reason: 'missing_order_id' };
     if (isManualPrintOnlyOrder(order)) {
       const orderId = String(order.id);
       this.forgetDeferredAcceptOrder(orderId);
       this.processedOrderIds.add(orderId);
       this.trimRuntimeCache(this.processedOrderIds);
       logger.info(`${this.getLogContext()} Atendimento #${order.order_number || orderId} exige recibo manual. Auto print ignorado.`);
-      return;
+      return { outcome: 'skipped', reason: 'manual_only' };
     }
     if (isOrderCancelled(order)) {
       // Pedido cancelado/recusado nunca imprime e sai da rede de seguranca.
       this.forgetDeferredAcceptOrder(order.id);
-      return;
+      return { outcome: 'skipped', reason: 'cancelled' };
     }
-    if (isPixOnlineOrder(order) && order.payment_status !== 'paid') return;
+    if (isPixOnlineOrder(order) && order.payment_status !== 'paid') {
+      return { outcome: 'skipped', reason: 'awaiting_payment' };
+    }
     if (wasAutoPrintedOffline(order)) {
       const orderId = String(order.id);
       this.forgetDeferredAcceptOrder(orderId);
       this.processedOrderIds.add(orderId);
       this.trimRuntimeCache(this.processedOrderIds);
       logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId} ja foi impresso offline pelo navegador. Auto print do Hub ignorado.`);
-      return;
+      return { outcome: 'skipped', reason: 'already_claimed' };
     }
     // Regra "imprimir somente ao aceitar": pedidos do cardapio digital
     // que ainda nao foram aceitos pelo lojista nao saem na chegada.
@@ -2060,7 +2074,7 @@ class PairedPrintListener {
     if (shouldDeferUntilAccept(order, this.printSettings)) {
       this.rememberDeferredAcceptOrder(order.id);
       logger.info(`${this.getLogContext()} Pedido #${order.order_number || order.id} do cardapio digital aguardando aceite. Impressao adiada (fonte=${source}).`);
-      return;
+      return { outcome: 'skipped', reason: 'awaiting_acceptance' };
     }
 
     if (
@@ -2071,7 +2085,7 @@ class PairedPrintListener {
         !isAwaitingAcceptance(order)
       )
     ) {
-      return;
+      return { outcome: 'skipped', reason: 'auto_print_disabled' };
     }
 
     const orderId = String(order.id);
@@ -2083,7 +2097,7 @@ class PairedPrintListener {
     // Guard em memória (mesma instância)
     if (this.processingOrderIds.has(orderId) || this.processedOrderIds.has(orderId)) {
       logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId} já em processamento/impresso (memória). Ignorando.`);
-      return;
+      return { outcome: 'skipped', reason: 'already_claimed' };
     }
 
     this.processingOrderIds.add(orderId);
@@ -2107,7 +2121,7 @@ class PairedPrintListener {
         this.processedOrderIds.add(orderId);
         this.trimRuntimeCache(this.processedOrderIds);
         logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId} processado para auto-print por impressora.`);
-        return;
+        return { outcome: 'printed' };
       }
 
       const hasScheduledPrintJob = await this.hasPrintJobWithStatuses(orderId, ['pending']);
@@ -2115,7 +2129,7 @@ class PairedPrintListener {
         logger.info(
           `${this.getLogContext()} Pedido #${order.order_number || orderId} já possui print job pendente. Ignorando auto print.`
         );
-        return;
+        return { outcome: 'skipped', reason: 'already_claimed' };
       }
 
       // Modo legado (sem sub-mapa autoPrint): usa a seleção por checkbox
@@ -2125,7 +2139,7 @@ class PairedPrintListener {
         logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId}: nenhuma via automática selecionada.`);
         this.processedOrderIds.add(orderId);
         this.trimRuntimeCache(this.processedOrderIds);
-        return;
+        return { outcome: 'skipped', reason: 'no_routes' };
       }
 
       let printedAnyRoute = false;
@@ -2209,20 +2223,26 @@ class PairedPrintListener {
         );
         this.processedOrderIds.add(orderId);
         this.trimRuntimeCache(this.processedOrderIds);
-        return;
+        return { outcome: 'skipped', reason: 'already_claimed' };
       }
 
       this.processedOrderIds.add(orderId);
       this.trimRuntimeCache(this.processedOrderIds);
       logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId} impresso e registrado.`);
+      return { outcome: 'printed' };
     } catch (error) {
       logger.error(
         `[Pairing] Falha ao imprimir automaticamente pedido #${order.order_number || orderId}:`,
         error
       );
+      if (error?.printOutcomeUncertain === true) {
+        return { outcome: 'attention', error };
+      }
       if (this.isRetriablePrintError(error)) {
         this.scheduleReconnect(error);
+        return { outcome: 'retry', error };
       }
+      return { outcome: 'attention', error };
     } finally {
       this.processingOrderIds.delete(orderId);
     }

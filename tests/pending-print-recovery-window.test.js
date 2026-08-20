@@ -66,7 +66,8 @@ function makeSupabaseMock({ jobs = [], orders = [] } = {}) {
         filters: [],
         inFilters: [],
         limit: null,
-        orderBy: null
+        orderBy: [],
+        range: null
       };
 
       const builder = {
@@ -91,17 +92,25 @@ function makeSupabaseMock({ jobs = [], orders = [] } = {}) {
           ctx.filters.push({ type: 'gte', column, value });
           return builder;
         },
+        lte(column, value) {
+          ctx.filters.push({ type: 'lte', column, value });
+          return builder;
+        },
         in(column, values) {
           ctx.inFilters.push({ column, values: values.map(String) });
           return builder;
         },
         order(column, options) {
-          ctx.orderBy = { column, ascending: options?.ascending !== false };
+          ctx.orderBy.push({ column, ascending: options?.ascending !== false });
           return builder;
         },
         limit(value) {
           ctx.limit = value;
           return builder;
+        },
+        range(from, to) {
+          ctx.range = { from, to };
+          return Promise.resolve(runQuery(ctx, { jobs, orders }));
         },
         then(resolve, reject) {
           try {
@@ -130,13 +139,19 @@ function runQuery(ctx, state) {
   }
 
   let data = rows.filter((row) => matches(row, ctx)).map((row) => ({ ...row }));
-  if (ctx.orderBy) {
-    const { column, ascending } = ctx.orderBy;
+  if (ctx.orderBy.length) {
     data.sort((a, b) => {
-      const left = String(a[column] || '');
-      const right = String(b[column] || '');
-      return ascending ? left.localeCompare(right) : right.localeCompare(left);
+      for (const { column, ascending } of ctx.orderBy) {
+        const left = String(a[column] || '');
+        const right = String(b[column] || '');
+        const comparison = left.localeCompare(right);
+        if (comparison !== 0) return ascending ? comparison : -comparison;
+      }
+      return 0;
     });
+  }
+  if (ctx.range) {
+    data = data.slice(ctx.range.from, ctx.range.to + 1);
   }
   if (Number.isFinite(ctx.limit)) {
     data = data.slice(0, ctx.limit);
@@ -150,6 +165,7 @@ function matches(row, ctx) {
     if (filter.type === 'eq' && value !== filter.value) return false;
     if (filter.type === 'lt' && !(String(value) < String(filter.value))) return false;
     if (filter.type === 'gte' && !(String(value) >= String(filter.value))) return false;
+    if (filter.type === 'lte' && !(String(value) <= String(filter.value))) return false;
   }
 
   for (const filter of ctx.inFilters) {

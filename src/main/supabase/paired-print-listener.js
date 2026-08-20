@@ -1,5 +1,6 @@
 const Settings = require('../config/settings');
 const logger = require('../utils/logger');
+const { randomUUID } = require('node:crypto');
 const { performance } = require('node:perf_hooks');
 const BaseWebSocketTransport = require('ws');
 const { DEFAULT_PRINT_SETTINGS } = require('../printer/pedidoshub-formatter');
@@ -19,9 +20,11 @@ const {
 } = require('../print-routes');
 const { calculateRecoveryWindow } = require('./recovery-window');
 const { fetchRecoveryOrders } = require('./recovery-orders');
+const AutoPrintIntentClient = require('./auto-print-intent-client');
 
 const HEARTBEAT_INTERVAL_MS = 15000;
 const WATCHDOG_INTERVAL_MS = 20000;
+const PROCESS_AUTO_PRINT_CONSUMER_ID = `hub-${randomUUID()}`;
 const RECOVERY_SKEW_MS = 10000;
 const RECOVERY_LOOKBACK_MS = 30 * 60 * 1000;
 const AUTO_PRINT_RECOVERY_MAX_AGE_MS = 5 * 60 * 1000;
@@ -90,6 +93,25 @@ function isPixOnlineOrder(order) {
 function isOrderCancelled(order) {
   const status = String(order?.status || '').toLowerCase();
   return ['cancelled', 'canceled', 'rejected'].includes(status);
+}
+
+function classifyAutoPrintError(error) {
+  if (error?.printOutcomeUncertain === true) return 'spool_uncertain';
+
+  const message = String(error?.message || error || '').toLowerCase();
+  if (message.includes('release')) return 'release';
+  if (message.includes('claim')) return 'claim';
+  if (message.includes('render')) return 'render';
+  if (message.includes('printer') || message.includes('impressora') || message.includes('route')) {
+    return 'printer_unavailable';
+  }
+  if ([
+    'fetch failed', 'network', 'timeout', 'closed', 'socket', 'econn',
+    'auth', 'token', 'sessao', 'sessão', 'http 500', 'http 502', 'http 503', 'http 504'
+  ].some((snippet) => message.includes(snippet))) {
+    return 'network';
+  }
+  return 'unknown';
 }
 
 function getOrderCustomData(order) {
@@ -390,6 +412,10 @@ class PairedPrintListener {
       ? options.traceIdFactory
       : () => createPrintTraceId();
     this.supabase = null;
+    this.autoPrintIntentClient = options.autoPrintIntentClient || null;
+    this.consumerId = typeof options.consumerId === 'string' && options.consumerId.trim()
+      ? options.consumerId.trim()
+      : PROCESS_AUTO_PRINT_CONSUMER_ID;
     this.currentPairing = this.pairingStore.getPairing();
     this.status = 'idle';
     this.lastError = null;
@@ -694,6 +720,7 @@ class PairedPrintListener {
       }
 
       await this.processPendingJobs();
+      await this.processAutoPrintIntents();
 
       if ((Date.now() - this.lastRecoveryRunAt) > (WATCHDOG_INTERVAL_MS - 1000)) {
         await this.recoverMissedOrders({ forceLookbackMs: RECOVERY_LOOKBACK_MS });
@@ -1012,6 +1039,7 @@ class PairedPrintListener {
           }
         }
       });
+      this.autoPrintIntentClient = new AutoPrintIntentClient(this.supabase);
       patchRealtimeConnect(this.supabase?.realtime);
 
       if (this.supabase.auth && typeof this.supabase.auth.onAuthStateChange === 'function') {
@@ -1487,6 +1515,71 @@ class PairedPrintListener {
 
     for (const job of data || []) {
       await this.processPrintJob(job, 'pending_recovery');
+    }
+  }
+
+  async loadOrderById(orderId) {
+    if (!this.supabase || !this.currentPairing?.adminClientId || !orderId) return null;
+
+    const { data, error } = await this.supabase
+      .from('orders')
+      .select('*')
+      .eq('admin_client_id', this.currentPairing.adminClientId)
+      .eq('id', orderId)
+      .maybeSingle();
+
+    if (error) throw error;
+    return data || null;
+  }
+
+  async processAutoPrintIntents() {
+    if (!this.currentPairing?.adminClientId) return;
+
+    if (!this.autoPrintIntentClient && this.supabase && typeof this.supabase.rpc === 'function') {
+      this.autoPrintIntentClient = new AutoPrintIntentClient(this.supabase);
+    }
+    if (!this.autoPrintIntentClient) return;
+
+    const intents = await this.autoPrintIntentClient.claim(
+      this.currentPairing.adminClientId,
+      this.consumerId,
+      10,
+      90
+    );
+
+    for (const intent of intents) {
+      let result;
+      try {
+        const order = await this.loadOrderById(intent.order_id);
+        if (!order) {
+          result = {
+            outcome: 'attention',
+            error: Object.assign(new Error('order_not_found'), { autoPrintErrorCode: 'unknown' })
+          };
+        } else {
+          result = await this.handleAutoPrintOrder(order, 'durable_intent');
+        }
+      } catch (error) {
+        result = { outcome: 'attention', error };
+      }
+
+      const attempted = Number(intent?.attempt_count || 0);
+      const rawOutcome = result?.outcome;
+      const outcome = rawOutcome === 'retry' && attempted < 3
+        ? 'retry'
+        : rawOutcome === 'retry' || rawOutcome === 'attention'
+          ? 'attention'
+          : 'completed';
+      const lastError = result?.error
+        ? (result.error.autoPrintErrorCode || classifyAutoPrintError(result.error))
+        : null;
+
+      await this.autoPrintIntentClient.settle(
+        intent.id,
+        intent.lease_token,
+        outcome,
+        lastError
+      );
     }
   }
 
@@ -2156,6 +2249,9 @@ class PairedPrintListener {
           telemetryContext
         );
         if (perPrinterOutcome === 'retry') {
+          if (source === 'durable_intent') {
+            return { outcome: 'attention', reason: 'no_printer_route' };
+          }
           return { outcome: 'retry', reason: 'configured_route_unavailable' };
         }
         if (perPrinterOutcome === 'attention') {
@@ -2168,6 +2264,9 @@ class PairedPrintListener {
           return { outcome: 'skipped', reason: 'already_claimed' };
         }
         if (perPrinterOutcome !== 'printed') {
+          if (source === 'durable_intent') {
+            return { outcome: 'attention', reason: 'no_printer_route' };
+          }
           return { outcome: 'skipped', reason: 'no_printed_routes' };
         }
         return { outcome: 'printed' };
@@ -2186,6 +2285,9 @@ class PairedPrintListener {
       const legacyRoutes = buildLegacyAutoPrintRoutes(this.printSettings);
       if (legacyRoutes.length === 0) {
         logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId}: nenhuma via automática selecionada.`);
+        if (source === 'durable_intent') {
+          return { outcome: 'attention', reason: 'no_printer_route' };
+        }
         this.processedOrderIds.add(orderId);
         this.trimRuntimeCache(this.processedOrderIds);
         return { outcome: 'skipped', reason: 'no_routes' };

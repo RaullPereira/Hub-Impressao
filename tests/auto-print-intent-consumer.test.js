@@ -4,14 +4,23 @@ const Module = require('node:module');
 const AutoPrintIntentClient = require('../src/main/supabase/auto-print-intent-client');
 
 const originalLoad = Module._load;
+const suppliedSupabaseClients = [];
 Module._load = function loadElectronStub(request, parent, isMain) {
   if (request === 'electron') {
     return { app: { getPath: () => os.tmpdir() } };
   }
+  if (request === '@supabase/supabase-js') {
+    return {
+      createClient: () => {
+        const nextClient = suppliedSupabaseClients.shift();
+        if (!nextClient) throw new Error('missing test Supabase instance');
+        return nextClient;
+      }
+    };
+  }
   return originalLoad.call(this, request, parent, isMain);
 };
 const PairedPrintListener = require('../src/main/supabase/paired-print-listener');
-Module._load = originalLoad;
 
 let passed = 0;
 let failed = 0;
@@ -95,6 +104,106 @@ async function test(name, fn) {
 
     await assert.rejects(() => client.claim('store-1', 'hub-1'), (error) => error === rpcError);
     assert.equal(client.available, true);
+  });
+
+  await test('a similarly named helper is not the missing RPC requested by this client', async () => {
+    const rpcError = {
+      code: '42883',
+      message: 'function public.claim_auto_print_intents_helper(uuid) does not exist'
+    };
+    const client = new AutoPrintIntentClient({
+      rpc: async () => ({ data: null, error: rpcError })
+    });
+
+    await assert.rejects(() => client.claim('store-1', 'hub-1'), (error) => error === rpcError);
+    assert.equal(client.available, true);
+  });
+
+  await test('reconnect binds an internal intent client to each new Supabase session', async () => {
+    const pairing = {
+      adminClientId: 'store-1',
+      supabaseUrl: 'https://example.supabase.co',
+      anonKey: 'anon-key',
+      enabled: true,
+      session: { access_token: 'access-token', refresh_token: 'refresh-token', expires_at: 9999999999 }
+    };
+    const makeSupabase = (id) => ({
+      id,
+      auth: {
+        setSession: async () => ({ data: { session: pairing.session }, error: null }),
+        stopAutoRefresh: () => {}
+      },
+      realtime: { setAuth: async () => {} }
+    });
+    const firstSupabase = makeSupabase('first');
+    const secondSupabase = makeSupabase('second');
+    suppliedSupabaseClients.push(firstSupabase, secondSupabase);
+
+    const listener = new PairedPrintListener(null, {
+      adminClientId: 'store-1',
+      pairingStore: {
+        getPairing: () => pairing,
+        updatePairing: (patch) => Object.assign(pairing, patch),
+        clearPairing: () => {}
+      }
+    });
+    listener.refreshPrintSettings = async () => {};
+    listener.subscribeChannels = async () => {};
+    listener.startHeartbeat = () => {};
+    listener.startWatchdog = () => {};
+    listener.touchHeartbeat = () => {};
+    listener.processPendingJobs = async () => {};
+
+    await listener.startWithPairing(pairing, { recoverMissedOrders: false });
+    const firstIntentClient = listener.autoPrintIntentClient;
+    await listener.startWithPairing(pairing, { recoverMissedOrders: false });
+
+    assert.notEqual(listener.autoPrintIntentClient, firstIntentClient);
+    assert.equal(firstIntentClient.supabase, firstSupabase);
+    assert.equal(listener.autoPrintIntentClient.supabase, secondSupabase);
+  });
+
+  await test('reconnect preserves an explicitly injected intent client', async () => {
+    const pairing = {
+      adminClientId: 'store-1',
+      supabaseUrl: 'https://example.supabase.co',
+      anonKey: 'anon-key',
+      enabled: true,
+      session: { access_token: 'access-token', refresh_token: 'refresh-token', expires_at: 9999999999 }
+    };
+    const makeSupabase = (id) => ({
+      id,
+      auth: {
+        setSession: async () => ({ data: { session: pairing.session }, error: null }),
+        stopAutoRefresh: () => {}
+      },
+      realtime: { setAuth: async () => {} }
+    });
+    const firstSupabase = makeSupabase('injected-first');
+    const secondSupabase = makeSupabase('injected-second');
+    suppliedSupabaseClients.push(firstSupabase, secondSupabase);
+    const injectedClient = { claim: async () => [], settle: async () => [] };
+    const listener = new PairedPrintListener(null, {
+      adminClientId: 'store-1',
+      autoPrintIntentClient: injectedClient,
+      pairingStore: {
+        getPairing: () => pairing,
+        updatePairing: (patch) => Object.assign(pairing, patch),
+        clearPairing: () => {}
+      }
+    });
+    listener.refreshPrintSettings = async () => {};
+    listener.subscribeChannels = async () => {};
+    listener.startHeartbeat = () => {};
+    listener.startWatchdog = () => {};
+    listener.touchHeartbeat = () => {};
+    listener.processPendingJobs = async () => {};
+
+    await listener.startWithPairing(pairing, { recoverMissedOrders: false });
+    await listener.startWithPairing(pairing, { recoverMissedOrders: false });
+
+    assert.equal(listener.autoPrintIntentClient, injectedClient);
+    assert.equal(listener.supabase, secondSupabase);
   });
 
   await test('settles retry only before the third attempt and sanitizes durable outcomes', async () => {

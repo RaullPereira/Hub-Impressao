@@ -412,6 +412,7 @@ class PairedPrintListener {
       ? options.traceIdFactory
       : () => createPrintTraceId();
     this.supabase = null;
+    this.hasInjectedAutoPrintIntentClient = options.autoPrintIntentClient != null;
     this.autoPrintIntentClient = options.autoPrintIntentClient || null;
     this.consumerId = typeof options.consumerId === 'string' && options.consumerId.trim()
       ? options.consumerId.trim()
@@ -1039,7 +1040,7 @@ class PairedPrintListener {
           }
         }
       });
-      if (!this.autoPrintIntentClient) {
+      if (!this.hasInjectedAutoPrintIntentClient) {
         this.autoPrintIntentClient = new AutoPrintIntentClient(this.supabase);
       }
       patchRealtimeConnect(this.supabase?.realtime);

@@ -8,8 +8,13 @@ function isMissingAutoPrintIntentRpc(error, rpcName) {
     .join(' ')
     .toLowerCase();
   const name = String(rpcName || '').toLowerCase();
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const nameIsExactIdentifier = new RegExp(
+    `(?:^|[^a-z0-9_$])${escapedName}(?=$|[^a-z0-9_$])`,
+    'i'
+  ).test(diagnostic);
 
-  return Boolean(name) && diagnostic.includes(name) && /(?:not found|does not exist|schema cache|could not find|missing)/.test(diagnostic);
+  return Boolean(name) && nameIsExactIdentifier && /(?:not found|does not exist|schema cache|could not find|missing)/.test(diagnostic);
 }
 
 class AutoPrintIntentClient {

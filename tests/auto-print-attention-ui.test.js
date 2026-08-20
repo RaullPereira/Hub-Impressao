@@ -25,8 +25,8 @@ check('renderer offers retry', html.includes('Reimprimir agora') || app.includes
 check('renderer offers dismiss', html.includes('Dispensar') || app.includes('Dispensar'), true);
 check('main registers attention IPC', main.includes("ipcMain.handle('get-auto-print-attention'"), true);
 check('main registers validated resolution IPC', main.includes("ipcMain.handle('resolve-auto-print-intent'"), true);
-check('client lists only operational attention fields', client.includes("select('id,order_id,status,eligibility_reason,attempt_count,last_error,attention_reason,created_at,updated_at,orders(order_number)')"), true);
-check('client includes stale pending intents and migration fallback', client.includes('status.eq.attention,and(status.eq.pending,created_at.lt.${staleCutoff})') && client.includes("error?.code === '42P01' || error?.code === 'PGRST205'"), true);
+check('client lists only operational attention fields', client.includes("select('id,order_id,status,eligibility_reason,attempt_count,last_error,attention_reason,operator_retry_at,created_at,updated_at,orders(order_number)')"), true);
+check('client includes stale pending intents by effective retry time and migration fallback', client.includes('operator_retry_at.is.null,created_at.lt.${staleCutoff}') && client.includes('operator_retry_at.lt.${staleCutoff}') && client.includes("error?.code === '42P01' || error?.code === 'PGRST205'"), true);
 check('listener exposes attention list and resolution', listener.includes('getAutoPrintAttention') && listener.includes('resolveAutoPrintIntent'), true);
 check('renderer mounts the compact attention panel', html.includes('id="auto-print-attention"'), true);
 check('renderer keeps attention actions load-aware', app.includes('resolveAttention') && app.includes("button.disabled = true"), true);

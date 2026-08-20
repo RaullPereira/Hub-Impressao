@@ -291,6 +291,53 @@ async function test(name, fn) {
     assert.deepEqual(printedIntentIds, ['intent-once']);
   });
 
+  await test('attention list keeps a recently retried pending intent out of the stale filter', async () => {
+    const query = { orFilter: null, selected: null };
+    const builder = {
+      select: (value) => {
+        query.selected = value;
+        return builder;
+      },
+      eq: () => builder,
+      or: (value) => {
+        query.orFilter = value;
+        return builder;
+      },
+      order: () => builder,
+      limit: async () => ({ data: [], error: null })
+    };
+    const client = new AutoPrintIntentClient({
+      from: () => builder,
+      rpc: async () => ({ data: [], error: null })
+    });
+
+    await client.listAttention('store-1');
+
+    assert.ok(query.selected.includes('operator_retry_at'));
+    assert.match(query.orFilter, /operator_retry_at\.is\.null/);
+    assert.match(query.orFilter, /operator_retry_at\.lt\./);
+    assert.match(query.orFilter, /created_at\.lt\./);
+  });
+
+  await test('missing resolve RPC rejects safely even after claim consumer is disabled', async () => {
+    const client = new AutoPrintIntentClient({
+      rpc: async (name) => ({
+        data: null,
+        error: {
+          code: 'PGRST202',
+          message: `function ${name} not found in schema cache`
+        }
+      })
+    });
+
+    assert.deepEqual(await client.claim('store-1', 'hub-1'), []);
+    await assert.rejects(
+      () => client.resolve('intent-1', 'retry'),
+      (error) => error?.code === 'AUTO_PRINT_INTENT_RESOLVE_UNAVAILABLE'
+        && !String(error.message).includes('intent-1')
+    );
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exitCode = failed ? 1 : 0;
 })();

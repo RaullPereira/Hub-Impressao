@@ -15,7 +15,7 @@ Module._load = function (request, parent, isMain) {
 const { fetchRecoveryOrders } = require('../src/main/supabase/recovery-orders');
 const PairedPrintListener = require('../src/main/supabase/paired-print-listener');
 
-function makeRangeSupabaseMock(sourceOrders) {
+function makeRangeSupabaseMock(sourceOrders, options = {}) {
   const ranges = [];
   const queries = [];
 
@@ -48,6 +48,9 @@ function makeRangeSupabaseMock(sourceOrders) {
           return query;
         },
         range(from, to) {
+          if (typeof options.onRange === 'function') {
+            options.onRange({ from, to, rangeCall: ranges.length + 1 });
+          }
           ranges.push([from, to]);
           queries.push({
             sinceIso: filters.find((filter) => filter.operator === 'gte' && filter.column === 'created_at')?.value,
@@ -154,6 +157,38 @@ function makeListener(supabase) {
       assert.deepEqual(handled, [{ id: 'missed-realtime-order', source: 'recovery' }]);
       assert.equal(supabase.queries[0].sinceIso, '2026-08-20T11:55:00.000Z');
       assert.equal(supabase.queries[0].untilIso, '2026-08-20T12:00:00.000Z');
+    } finally {
+      Date.now = realNow;
+    }
+  }
+
+  {
+    const realNow = Date.now;
+    let nowMs = Date.parse('2026-08-20T12:00:00.000Z');
+    Date.now = () => nowMs;
+    try {
+      const supabase = makeRangeSupabaseMock([{
+        id: 'snapshot-boundary-order',
+        admin_client_id: 'store-1',
+        order_number: 1002,
+        status: 'preparing',
+        payment_method: 'cash',
+        created_at: '2026-08-20T11:55:00.001Z'
+      }], {
+        onRange: () => {
+          nowMs += 10_000;
+        }
+      });
+      const listener = makeListener(supabase);
+      const handled = [];
+      listener.handleAutoPrintOrder = async (order, source) => {
+        handled.push({ id: order.id, source });
+        return { outcome: 'printed' };
+      };
+
+      await listener.recoverMissedOrders({ forceLookbackMs: 30 * 60_000 });
+
+      assert.deepEqual(handled, [{ id: 'snapshot-boundary-order', source: 'recovery' }]);
     } finally {
       Date.now = realNow;
     }

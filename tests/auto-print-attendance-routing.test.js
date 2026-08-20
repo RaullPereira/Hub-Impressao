@@ -114,6 +114,20 @@ function makeListener(printerMap) {
     check('attendance-only routed order claims attendance ledger', claimed, ['attendance']);
   }
 
+  {
+    const { listener } = makeListener({});
+    const result = await listener.autoPrintPerPrinter({
+      id: 'order-no-printer',
+      order_number: 1003,
+      order_type: 'delivery'
+    }, 'order-no-printer', {
+      kitchen: 'Kitchen',
+      attendance: 'Attendance'
+    }, 'recovery');
+
+    check('nenhuma via disponivel nao e contada como impressa', result, 'skipped');
+  }
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })().catch((error) => {

@@ -164,14 +164,16 @@ function parseIsoDate(value) {
 }
 
 function isOlderThan(value, maxAgeMs, options = {}) {
-  const { staleWhenMissing = false } = options;
+  const { staleWhenMissing = false, nowMs = Date.now() } = options;
   const parsed = parseIsoDate(value);
   if (!parsed) return staleWhenMissing;
-  return (Date.now() - parsed.getTime()) > maxAgeMs;
+  return (nowMs - parsed.getTime()) > maxAgeMs;
 }
 
-function isRecoveredOrderTooOld(order) {
-  return isOlderThan(order?.created_at || order?.createdAt, AUTO_PRINT_RECOVERY_MAX_AGE_MS);
+function isRecoveredOrderTooOld(order, referenceMs = Date.now()) {
+  return isOlderThan(order?.created_at || order?.createdAt, AUTO_PRINT_RECOVERY_MAX_AGE_MS, {
+    nowMs: referenceMs
+  });
 }
 
 function isRecoveredPrintJobTooOld(job) {
@@ -1314,11 +1316,12 @@ class PairedPrintListener {
       untilIso: recoveryWindow.untilIso,
       pageSize: 50
     });
+    const recoveryReferenceMs = Date.parse(recoveryWindow.untilIso);
 
     const eligibleOrders = (recentOrders || []).filter((order) => {
       if (!order?.id) return false;
       if (isManualPrintOnlyOrder(order)) return false;
-      if (isRecoveredOrderTooOld(order)) return false;
+      if (isRecoveredOrderTooOld(order, recoveryReferenceMs)) return false;
       if (isOrderCancelled(order)) return false;
       if (isPixOnlineOrder(order) && order.payment_status !== 'paid') return false;
       // Nao recuperar/imprimir pedidos do cardapio digital ainda aguardando aceite.
@@ -2117,10 +2120,19 @@ class PairedPrintListener {
         // Modo per-printer: roteia cada via aplicavel apenas para sua impressora
         // explicita, reivindica o ledger por printer_type (exactly-once por via) e
         // pula vias sem impressora configurada (sem fallback para default).
-        await this.autoPrintPerPrinter(order, orderId, autoPrintMap, source, telemetryContext);
+        const perPrinterOutcome = await this.autoPrintPerPrinter(
+          order,
+          orderId,
+          autoPrintMap,
+          source,
+          telemetryContext
+        );
         this.processedOrderIds.add(orderId);
         this.trimRuntimeCache(this.processedOrderIds);
         logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId} processado para auto-print por impressora.`);
+        if (perPrinterOutcome !== 'printed') {
+          return { outcome: 'skipped', reason: 'no_printed_routes' };
+        }
         return { outcome: 'printed' };
       }
 
@@ -2272,7 +2284,7 @@ class PairedPrintListener {
       logger.info(
         `${this.getLogContext()} Pedido #${order.order_number || orderId}: nenhuma via aplicavel com impressora de auto-print configurada. Nada a imprimir.`
       );
-      return;
+      return 'skipped';
     }
 
     const resolutionResults = await Promise.allSettled(vias.map(async (via) => ({
@@ -2317,7 +2329,7 @@ class PairedPrintListener {
       if (resolverFailures.length > 0) {
         throw resolverFailures[0];
       }
-      return;
+      return 'skipped';
     }
 
     const renderStartedAt = this.getPrintPerformanceNow();
@@ -2535,6 +2547,9 @@ class PairedPrintListener {
     if (resolverFailures.length > 0) {
       throw resolverFailures[0];
     }
+    return printResults.some((result) => result.status === 'fulfilled' && result.value === 'printed')
+      ? 'printed'
+      : 'skipped';
   }
 
   /**

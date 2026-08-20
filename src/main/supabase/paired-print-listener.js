@@ -17,6 +17,7 @@ const {
   normalizeAutoPrintMap,
   normalizeAutoPrintRoute
 } = require('../print-routes');
+const { calculateRecoveryWindow } = require('./recovery-window');
 
 const HEARTBEAT_INTERVAL_MS = 15000;
 const WATCHDOG_INTERVAL_MS = 20000;
@@ -1295,24 +1296,15 @@ class PairedPrintListener {
       return;
     }
 
-    const lastSeenAt = parseIsoDate(this.currentPairing.lastSeenAt);
-    let sinceDate = lastSeenAt
-      ? new Date(lastSeenAt.getTime() - RECOVERY_SKEW_MS)
-      : new Date(Date.now() - (forceLookbackMs || RECOVERY_LOOKBACK_MS));
-
-    if (forceLookbackMs) {
-      const minimumSince = new Date(Date.now() - forceLookbackMs);
-      if (sinceDate.getTime() < minimumSince.getTime()) {
-        sinceDate = minimumSince;
-      }
-    }
-
-    const automaticRecoverySince = new Date(Date.now() - AUTO_PRINT_RECOVERY_MAX_AGE_MS);
-    if (sinceDate.getTime() < automaticRecoverySince.getTime()) {
-      sinceDate = automaticRecoverySince;
-    }
-
-    const sinceIso = sinceDate.toISOString();
+    const recoveryWindow = calculateRecoveryWindow({
+      nowMs: Date.now(),
+      lastSeenAt: this.currentPairing.lastSeenAt,
+      forceLookbackMs,
+      recoverySkewMs: RECOVERY_SKEW_MS,
+      defaultLookbackMs: RECOVERY_LOOKBACK_MS,
+      maxAutomaticAgeMs: AUTO_PRINT_RECOVERY_MAX_AGE_MS
+    });
+    const sinceIso = recoveryWindow.sinceIso;
     logger.info(`${this.getLogContext()} Recuperando pedidos desde ${sinceIso}`);
 
     const { data: recentOrders, error } = await this.supabase

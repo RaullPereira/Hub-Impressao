@@ -60,17 +60,23 @@ class AutoPrintIntentClient {
     });
   }
 
-  async listAttention(adminClientId, limit = 50) {
+  async listAttention(adminClientId) {
     if (!this.available) return [];
+
+    const staleCutoff = new Date(Date.now() - 5 * 60_000).toISOString();
 
     const { data, error } = await this.supabase
       .from('auto_print_intents')
-      .select('*')
+      .select('id,order_id,status,eligibility_reason,attempt_count,last_error,attention_reason,created_at,updated_at,orders(order_number)')
       .eq('admin_client_id', adminClientId)
-      .eq('status', 'attention')
+      .or(`status.eq.attention,and(status.eq.pending,created_at.lt.${staleCutoff})`)
       .order('updated_at', { ascending: false })
-      .limit(Math.min(Math.max(Number(limit) || 50, 1), 100));
+      .limit(20);
 
+    if (error?.code === '42P01' || error?.code === 'PGRST205') {
+      this.available = false;
+      return [];
+    }
     if (error) throw error;
     return Array.isArray(data) ? data : [];
   }

@@ -6,6 +6,9 @@ contextBridge.exposeInMainWorld('api', {
   testPrinter: (printerName) => ipcRenderer.invoke('test-printer', printerName),
   getLogs: (options) => ipcRenderer.invoke('get-logs', options),
   getPairingStatus: () => ipcRenderer.invoke('get-pairing-status'),
+  getAutoPrintAttention: () => ipcRenderer.invoke('get-auto-print-attention'),
+  resolveAutoPrintIntent: (intentId, action) =>
+    ipcRenderer.invoke('resolve-auto-print-intent', { intentId, action }),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   manualPrint: (payload) => ipcRenderer.invoke('manual-print', payload),
   addManualPrinter: (payload) => ipcRenderer.invoke('add-manual-printer', payload),

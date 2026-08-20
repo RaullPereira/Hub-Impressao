@@ -517,6 +517,26 @@ ipcMain.handle('get-pairing-status', async () => {
   return thermalApp.pairedPrintListener.getStatus();
 });
 
+ipcMain.handle('get-auto-print-attention', async () => {
+  if (!thermalApp.pairedPrintListener || typeof thermalApp.pairedPrintListener.getAutoPrintAttention !== 'function') {
+    return [];
+  }
+
+  return thermalApp.pairedPrintListener.getAutoPrintAttention();
+});
+
+ipcMain.handle('resolve-auto-print-intent', async (_event, payload = {}) => {
+  const intentId = typeof payload.intentId === 'string' ? payload.intentId.trim() : '';
+  const action = payload.action;
+  if (!intentId) throw new Error('Intenção de impressão não informada');
+  if (!['retry', 'dismiss'].includes(action)) throw new Error('Ação de intenção inválida');
+  if (!thermalApp.pairedPrintListener || typeof thermalApp.pairedPrintListener.resolveAutoPrintIntent !== 'function') {
+    throw new Error('Consumidor de intenções indisponível');
+  }
+
+  return thermalApp.pairedPrintListener.resolveAutoPrintIntent(intentId, action);
+});
+
 ipcMain.handle('get-settings', async () => {
   const settings = Settings.getAll();
   const pairings = Object.values(settings.pairings || {}).map((pairing) => ({

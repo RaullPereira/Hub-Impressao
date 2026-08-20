@@ -2,6 +2,15 @@ let refreshInterval = null;
 const PRINTER_DISCOVERY_TIMEOUT_MS = 10000;
 let lastSettings = null;
 let lastPairingStatus = null;
+const AUTO_PRINT_ATTENTION_ERROR_LABELS = {
+  spool_uncertain: 'Resultado da impressão incerto',
+  network: 'Falha de rede local',
+  render: 'Falha ao preparar a via',
+  printer_unavailable: 'Sem rota de impressora disponível',
+  claim: 'Falha ao reservar a impressão',
+  release: 'Falha ao liberar a reserva',
+  unknown: 'Ação operacional necessária'
+};
 
 document.addEventListener('DOMContentLoaded', () => {
   const textarea = document.getElementById('manual-text');
@@ -68,6 +77,7 @@ async function initializeScreen() {
   await loadOperationalStatus();
   await loadPrinters();
   await loadDashboardActivity();
+  await loadAutoPrintAttention();
 
   if (refreshInterval) {
     clearInterval(refreshInterval);
@@ -76,6 +86,7 @@ async function initializeScreen() {
   refreshInterval = setInterval(() => {
     void loadOperationalStatus();
     void loadDashboardActivity();
+    void loadAutoPrintAttention();
     const logsView = document.getElementById('logs');
     if (logsView && logsView.classList.contains('active')) {
       void loadLogs();
@@ -157,6 +168,125 @@ function renderRouteWarnings(settings, pairingStatus) {
       ${warnings.map((entry) => `<div class="route-line">${escapeHtml(entry)}</div>`).join('')}
     </div>
   `;
+}
+
+function formatAttentionTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Horário indisponível';
+  return date.toLocaleString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+}
+
+function getAttentionOrderLabel(intent) {
+  const orderNumber = intent?.orders?.order_number;
+  return orderNumber === null || orderNumber === undefined || orderNumber === ''
+    ? 'Pedido sem número'
+    : `Pedido #${String(orderNumber).slice(0, 12)}`;
+}
+
+function getAttentionErrorLabel(intent) {
+  const code = String(intent?.attention_reason || intent?.last_error || 'unknown').trim().toLowerCase();
+  return AUTO_PRINT_ATTENTION_ERROR_LABELS[code] || AUTO_PRINT_ATTENTION_ERROR_LABELS.unknown;
+}
+
+function renderAutoPrintAttention(intents) {
+  const panel = document.getElementById('auto-print-attention');
+  if (!panel) return;
+
+  panel.replaceChildren();
+  const title = document.createElement('div');
+  title.className = 'route-panel-title';
+  title.textContent = 'Atenção na autoimpressão';
+  panel.appendChild(title);
+
+  const body = document.createElement('div');
+  body.className = 'route-panel-body auto-print-attention-body';
+  if (!Array.isArray(intents) || intents.length === 0) {
+    body.textContent = 'Nenhuma intenção precisa de ação.';
+    panel.appendChild(body);
+    return;
+  }
+
+  intents.forEach((intent) => {
+    const item = document.createElement('div');
+    item.className = 'auto-print-attention-item';
+
+    const summary = document.createElement('div');
+    summary.className = 'auto-print-attention-summary';
+    const order = document.createElement('strong');
+    order.textContent = getAttentionOrderLabel(intent);
+    const meta = document.createElement('span');
+    meta.textContent = `${formatAttentionTime(intent.updated_at || intent.created_at)} · ${Math.max(0, Number(intent.attempt_count) || 0)} tentativa(s)`;
+    summary.append(order, meta);
+
+    const reason = document.createElement('span');
+    reason.className = 'auto-print-attention-reason';
+    reason.textContent = getAttentionErrorLabel(intent);
+
+    const actions = document.createElement('div');
+    actions.className = 'auto-print-attention-actions';
+    const retryButton = document.createElement('button');
+    retryButton.type = 'button';
+    retryButton.className = 'btn-primary auto-print-attention-retry';
+    retryButton.textContent = 'Reimprimir agora';
+    retryButton.addEventListener('click', () => resolveAttention(intent, 'retry', actions));
+    const dismissButton = document.createElement('button');
+    dismissButton.type = 'button';
+    dismissButton.className = 'btn-tertiary auto-print-attention-dismiss';
+    dismissButton.textContent = 'Dispensar';
+    dismissButton.addEventListener('click', () => resolveAttention(intent, 'dismiss', actions));
+    actions.append(retryButton, dismissButton);
+
+    item.append(summary, reason, actions);
+    body.appendChild(item);
+  });
+
+  panel.appendChild(body);
+}
+
+async function loadAutoPrintAttention() {
+  const panel = document.getElementById('auto-print-attention');
+  if (!panel) return;
+
+  if (!window.api?.getAutoPrintAttention) {
+    renderAutoPrintAttention([]);
+    return;
+  }
+
+  try {
+    renderAutoPrintAttention(await window.api.getAutoPrintAttention());
+  } catch (error) {
+    panel.replaceChildren();
+    const title = document.createElement('div');
+    title.className = 'route-panel-title';
+    title.textContent = 'Atenção na autoimpressão';
+    const body = document.createElement('div');
+    body.className = 'route-panel-body';
+    body.textContent = 'Não foi possível carregar as intenções agora.';
+    panel.append(title, body);
+  }
+}
+
+async function resolveAttention(intent, action, actions) {
+  const buttons = Array.from(actions.querySelectorAll('button'));
+  buttons.forEach((button) => {
+    button.disabled = true;
+  });
+
+  try {
+    if (!window.api?.resolveAutoPrintIntent) throw new Error('Ação indisponível');
+    await window.api.resolveAutoPrintIntent(intent.id, action);
+    await loadAutoPrintAttention();
+  } catch (error) {
+    buttons.forEach((button) => {
+      button.disabled = false;
+    });
+    const existing = actions.querySelector('.auto-print-attention-action-error');
+    if (existing) existing.remove();
+    const message = document.createElement('span');
+    message.className = 'auto-print-attention-action-error';
+    message.textContent = 'Não foi possível concluir a ação. Tente novamente.';
+    actions.appendChild(message);
+  }
 }
 
 async function loadOperationalStatus() {

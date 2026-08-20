@@ -1586,6 +1586,30 @@ class PairedPrintListener {
     }
   }
 
+  async getAutoPrintAttention() {
+    if (!this.currentPairing?.adminClientId) return [];
+
+    if (!this.autoPrintIntentClient && this.supabase && typeof this.supabase.rpc === 'function') {
+      this.autoPrintIntentClient = new AutoPrintIntentClient(this.supabase);
+    }
+    if (!this.autoPrintIntentClient) return [];
+
+    return this.autoPrintIntentClient.listAttention(this.currentPairing.adminClientId);
+  }
+
+  async resolveAutoPrintIntent(intentId, action) {
+    const normalizedIntentId = typeof intentId === 'string' ? intentId.trim() : '';
+    if (!normalizedIntentId) throw new Error('Intenção de impressão não informada');
+    if (!['retry', 'dismiss'].includes(action)) throw new Error('Ação de intenção inválida');
+
+    if (!this.autoPrintIntentClient && this.supabase && typeof this.supabase.rpc === 'function') {
+      this.autoPrintIntentClient = new AutoPrintIntentClient(this.supabase);
+    }
+    if (!this.autoPrintIntentClient) throw new Error('Consumidor de intenções indisponível');
+
+    return this.autoPrintIntentClient.resolve(normalizedIntentId, action);
+  }
+
   async hasPrintJobWithStatuses(orderId, statuses = ['printed']) {
     if (!this.supabase || !this.currentPairing?.adminClientId) return false;
     if (!Array.isArray(statuses) || statuses.length === 0) return false;

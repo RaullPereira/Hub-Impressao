@@ -326,6 +326,75 @@ body {
   margin-bottom: 1.5rem;
 }
 
+.auto-print-attention-panel {
+  border-left: 3px solid #d97706;
+}
+
+.auto-print-attention-body {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.auto-print-attention-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 0;
+  border-top: 1px solid var(--border-color);
+}
+
+.auto-print-attention-item:first-child {
+  border-top: 0;
+}
+
+.auto-print-attention-summary {
+  min-width: 0;
+  display: grid;
+  gap: 0.15rem;
+}
+
+.auto-print-attention-summary strong {
+  font-size: 0.875rem;
+}
+
+.auto-print-attention-summary span,
+.auto-print-attention-reason,
+.auto-print-attention-action-error {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.auto-print-attention-reason {
+  color: #9a6700;
+  font-weight: 600;
+}
+
+.auto-print-attention-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.auto-print-attention-actions button {
+  min-height: 32px;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.75rem;
+}
+
+.auto-print-attention-actions button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.auto-print-attention-action-error {
+  width: 100%;
+  color: #b91c1c;
+  text-align: right;
+}
+
 .route-panel-title {
   font-size: 0.78rem;
   font-weight: 700;
@@ -693,6 +762,19 @@ body {
   .stats-grid,
   .printer-grid {
     grid-template-columns: 1fr;
+  }
+
+  .auto-print-attention-item {
+    grid-template-columns: 1fr;
+    gap: 0.45rem;
+  }
+
+  .auto-print-attention-actions {
+    justify-content: flex-start;
+  }
+
+  .auto-print-attention-action-error {
+    text-align: left;
   }
 }
 

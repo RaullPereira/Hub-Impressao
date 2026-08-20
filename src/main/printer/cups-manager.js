@@ -3,6 +3,8 @@ const { promisify } = require('util');
 const fs = require('fs');
 const execPromise = promisify(exec);
 const logger = require('../utils/logger');
+const pedidosHubFormatter = require('./pedidoshub-formatter');
+const { formatManualTextPrint } = require('./manual-text-formatter');
 
 class CUPSPrinterManager {
   constructor() {
@@ -101,7 +103,7 @@ class CUPSPrinterManager {
 
   async print(printerIdOrOptions, orderData, printType = 'counter') {
     // Aceita tanto print(printerId, orderData, printType) quanto print({ printer, orderData, rawContent, printType, useRawContent })
-    let printerId, rawContent, useRawContent;
+    let printerId, rawContent, useRawContent, printSettings;
     
     if (typeof printerIdOrOptions === 'object' && printerIdOrOptions !== null) {
       printerId = printerIdOrOptions.printer;
@@ -109,6 +111,7 @@ class CUPSPrinterManager {
       rawContent = printerIdOrOptions.rawContent;
       printType = printerIdOrOptions.printType || 'counter';
       useRawContent = printerIdOrOptions.useRawContent;
+      printSettings = printerIdOrOptions.printSettings;
     } else {
       printerId = printerIdOrOptions;
     }
@@ -140,23 +143,19 @@ class CUPSPrinterManager {
         return this.print({ ...printerIdOrOptions, printer: printers[0].id });
       }
       // Usa a impressora encontrada
-      return this._executePrint(found, orderData, rawContent, useRawContent, printType);
+      return this._executePrint(found, orderData, rawContent, useRawContent, printType, printSettings);
     }
 
-    return this._executePrint(printer, orderData, rawContent, useRawContent, printType);
+    return this._executePrint(printer, orderData, rawContent, useRawContent, printType, printSettings);
   }
 
-  async _executePrint(printer, orderData, rawContent, useRawContent, printType) {
+  async _executePrint(printer, orderData, rawContent, useRawContent, printType, printSettings) {
     logger.info('[PRINT] Impressora selecionada:', printer.name);
 
     let escposBuffer;
-    // Se orderData.text existir, imprime puro SEMPRE
-    if (orderData && orderData.text) {
-      logger.info('[PRINT] Imprimindo texto puro do campo manual-text');
-      // Adiciona várias quebras de linha e comando de corte ESC/POS ao final, usando encoding latin1
-      const texto = orderData.text + '\n\n\n\n\n\n';
-      const corte = Buffer.from([0x1D, 0x56, 0x00]);
-      escposBuffer = Buffer.concat([Buffer.from(texto, 'latin1'), corte]);
+    if (orderData && typeof orderData.text === 'string') {
+      logger.info('[PRINT] Imprimindo texto manual em formato compacto 58mm');
+      escposBuffer = formatManualTextPrint(orderData.text, printSettings);
     } else if (useRawContent && rawContent) {
       logger.info('[PRINT] ⚡ Usando rawContent DIRETAMENTE (useRawContent=true)');
       if (typeof rawContent === 'string') {
@@ -188,44 +187,10 @@ class CUPSPrinterManager {
         escposBuffer = Buffer.from(String(rawContent));
       }
     } else {
-      // Construir comandos ESC/POS a partir do orderData
-      const orderNum = String(orderData.order_number || '0').padStart(3, '0');
-      const customerName = orderData.customer_name || 'Cliente';
-      const items = orderData.items || [];
-      const total = (orderData.total || 0).toFixed(2);
-
-      logger.info('[PRINT] Construindo buffer ESC/POS...');
-
-      const parts = [];
-      parts.push(Buffer.from([0x1B, 0x40]));
-      parts.push(Buffer.from([0x1B, 0x61, 0x01]));
-      parts.push(Buffer.from([0x1D, 0x21, 0x11]));
-      parts.push(Buffer.from(`PEDIDO #${orderNum}\n`));
-      parts.push(Buffer.from([0x1D, 0x21, 0x00]));
-      parts.push(Buffer.from('\n'));
-      parts.push(Buffer.from([0x1B, 0x61, 0x00]));
-      parts.push(Buffer.from(`CLIENTE: ${customerName}\n\n`));
-      parts.push(Buffer.from('ITENS:\n'));
-      parts.push(Buffer.from('================================\n'));
-
-      items.forEach(item => {
-        const qty = item.quantity || 1;
-        const name = item.product_name || item.name || 'Item';
-        const price = (item.total_price || 0).toFixed(2);
-        parts.push(Buffer.from(`${qty}x ${name}\n`));
-        parts.push(Buffer.from(`   R$ ${price}\n`));
-        parts.push(Buffer.from('--------------------------------\n'));
-      });
-
-      parts.push(Buffer.from('\n'));
-      parts.push(Buffer.from([0x1B, 0x61, 0x01]));
-      parts.push(Buffer.from([0x1D, 0x21, 0x11]));
-      parts.push(Buffer.from(`TOTAL: R$ ${total}\n`));
-      parts.push(Buffer.from([0x1D, 0x21, 0x00]));
-      parts.push(Buffer.from([0x0A, 0x0A, 0x0A]));
-      parts.push(Buffer.from([0x1D, 0x56, 0x00]));
-
-      escposBuffer = Buffer.concat(parts);
+      logger.info('[PRINT] Construindo buffer ESC/POS via formatter PedidosHub...');
+      const commands = pedidosHubFormatter.generateOrderPrintData(orderData, printType, printSettings);
+      const commandString = Array.isArray(commands) ? commands.join('') : String(commands);
+      escposBuffer = Buffer.from(commandString, 'binary');
     }
     
     logger.info(`[PRINT] Buffer criado: ${escposBuffer.length} bytes`);

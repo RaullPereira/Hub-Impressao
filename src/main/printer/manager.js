@@ -14,28 +14,44 @@ const path = require('path');
 const os = require('os');
 const winSpool = require('./win-spool');
 const Settings = require('../config/settings');
+const { formatManualTextPrint } = require('./manual-text-formatter');
 
 class PrinterManager extends EventEmitter {
-  constructor() {
+  constructor(options = {}) {
     super();
     this.printers = new Map();
-    this.discoverPrinters();
+    this.includeSystemPrinters = options.includeSystem !== false;
+    this._discoveryTimer = null;
+    this._discoveryPromise = null;
+    this._lastDiscoveryAt = 0;
+    this._discoveryCacheMs = 15000;
+    this.discoverPrinters(true);
   }
 
-  async discoverPrinters() {
+  async discoverPrinters(force = false) {
+    const now = Date.now();
+    if (!force && this._discoveryPromise) {
+      return this._discoveryPromise;
+    }
+
+    if (!force && this.printers.size > 0 && (now - this._lastDiscoveryAt) < this._discoveryCacheMs) {
+      return this.getPrinters();
+    }
+
+    this._discoveryPromise = (async () => {
+      const nextPrinters = new Map();
+
     try {
-      this.printers.clear();
-      // Listar impressoras USB (apenas se o módulo estiver disponível)
       const usbDevices = USB ? USB.findPrinter() : [];
       usbDevices.forEach((device, index) => {
         const desc = device.deviceDescriptor;
         let name = `USB_${desc.idVendor.toString(16)}_${desc.idProduct.toString(16)}`;
         const id = `usb-${index}`;
-        this.printers.set(id, {
+        nextPrinters.set(id, {
           id,
           name,
           type: 'usb',
-          index: index, // Salvar apenas o índice
+          index: index,
           vendorId: desc.idVendor,
           productId: desc.idProduct,
           status: 'ready'
@@ -43,33 +59,28 @@ class PrinterManager extends EventEmitter {
       });
       logger.info(`${usbDevices.length} impressora(s) USB detectadas`);
 
-      // On Windows, try to match USB devices to installed Windows printer queues (automatic mapping)
       if (os.platform() === 'win32') {
         try {
           const pnp = await winSpool.listPnpDevices();
           const winPrinters = await winSpool.listPrinters();
-          // For ease, lowercase copies
           const winPrintersLower = winPrinters.map(p => p.toLowerCase());
 
-          for (const [id, p] of this.printers) {
+          for (const [id, p] of nextPrinters) {
             if (p.type !== 'usb') continue;
             const vid = p.vendorId ? p.vendorId.toString(16).padStart(4, '0').toUpperCase() : null;
             const pid = p.productId ? p.productId.toString(16).padStart(4, '0').toUpperCase() : null;
             if (!vid || !pid) continue;
             const search = `VID_${vid}&PID_${pid}`.toUpperCase();
-            // find PnP matches
             const matches = (pnp || []).filter(d => {
               const iid = (d.InstanceId || d.instanceId || '').toString().toUpperCase();
               return iid.includes(search);
             });
             if (matches.length === 0) continue;
-            // Try to find a Windows printer name that contains the FriendlyName or model
             let chosenPrinter = null;
             for (const m of matches) {
               const friendly = (m.FriendlyName || m.friendlyName || '').toString().trim();
               if (!friendly) continue;
               const fl = friendly.toLowerCase();
-              // Prefer exact contains
               for (let i = 0; i < winPrintersLower.length; i++) {
                 if (winPrintersLower[i].includes(fl) || fl.includes(winPrintersLower[i])) {
                   chosenPrinter = winPrinters[i];
@@ -77,7 +88,6 @@ class PrinterManager extends EventEmitter {
                 }
               }
               if (chosenPrinter) break;
-              // fallback: match by tokens
               const tokens = fl.split(/\s+/).filter(Boolean);
               for (let i = 0; i < winPrintersLower.length; i++) {
                 for (const t of tokens) {
@@ -92,9 +102,8 @@ class PrinterManager extends EventEmitter {
               if (chosenPrinter) break;
             }
             if (chosenPrinter) {
-              // Update the printer entry to show Windows queue name
               const friendlyName = matches[0].FriendlyName || matches[0].friendlyName || null;
-              this.printers.set(id, Object.assign({}, p, {
+              nextPrinters.set(id, Object.assign({}, p, {
                 name: friendlyName || chosenPrinter,
                 queueName: chosenPrinter,
                 type: 'usb',
@@ -108,69 +117,81 @@ class PrinterManager extends EventEmitter {
         }
       }
 
-      // Listar impressoras do sistema (CUPS) - todas, inclusive pausadas
-      let cupsPrinters = [];
-      let descriptions = {};
-      try {
-        // Buscar descrições detalhadas
-        const descOut = execSync('lpstat -l -p', { encoding: 'utf-8' });
-        // Exemplo de bloco:
-        // printer _USB_Receipt_Printer ...\n    Description: IMPRESSORA TANCA 1\n    ...
-        let current = null;
-        descOut.split('\n').forEach(line => {
-          const printerMatch = line.match(/^printer ([^ ]+)/);
-          if (printerMatch) {
-            current = printerMatch[1];
-          }
-          const descMatch = line.match(/Description:\s*(.*)/);
-          if (current && descMatch) {
-            descriptions[current] = descMatch[1];
+      if (this.includeSystemPrinters) {
+        let cupsPrinters = [];
+        let descriptions = {};
+        try {
+          const descOut = execSync('lpstat -l -p', { encoding: 'utf-8' });
+          let current = null;
+          descOut.split('\n').forEach(line => {
+            const printerMatch = line.match(/^printer ([^ ]+)/);
+            if (printerMatch) {
+              current = printerMatch[1];
+            }
+            const descMatch = line.match(/Description:\s*(.*)/);
+            if (current && descMatch) {
+              descriptions[current] = descMatch[1];
+            }
+          });
+        } catch (err) {
+          logger.error('Erro ao buscar descrições detalhadas das impressoras:', err);
+        }
+        try {
+          const stdout = execSync('lpstat -v', { encoding: 'utf-8' });
+          cupsPrinters = stdout.split('\n')
+            .map(line => {
+              const match = line.match(/^(?:device for|dispositivo para) ([^:]+):/);
+              return match ? match[1] : null;
+            })
+            .filter(Boolean);
+        } catch (err) {
+          logger.error('Erro ao listar impressoras CUPS:', err);
+        }
+        cupsPrinters.forEach((name) => {
+          const id = `cups-${name}`;
+          const friendlyName = descriptions[name] || name;
+          if (!nextPrinters.has(id)) {
+            nextPrinters.set(id, {
+              id,
+              name: friendlyName,
+              queueName: name,
+              type: 'cups',
+              status: 'ready'
+            });
           }
         });
-      } catch (err) {
-        logger.error('Erro ao buscar descrições detalhadas das impressoras:', err);
+        logger.info(`${cupsPrinters.length} impressora(s) detectadas via CUPS: [${cupsPrinters.join(', ')}]`);
       }
-      try {
-        const stdout = execSync('lpstat -v', { encoding: 'utf-8' });
-        logger.info('[CUPS] Saída bruta do lpstat -v:\n' + stdout);
-        console.log('[CUPS] Saída bruta do lpstat -v:\n' + stdout);
-        // Cada linha: device for NOME_PRINTER: ...
-        cupsPrinters = stdout.split('\n')
-          .map(line => {
-            // Aceita tanto 'device for' (en) quanto 'dispositivo para' (pt-br)
-            const match = line.match(/^(?:device for|dispositivo para) ([^:]+):/);
-            return match ? match[1] : null;
-          })
-          .filter(Boolean);
-        logger.info('[CUPS] Nomes extraídos: ' + JSON.stringify(cupsPrinters));
-        console.log('[CUPS] Nomes extraídos:', cupsPrinters);
-      } catch (err) {
-        logger.error('Erro ao listar impressoras CUPS:', err);
-      }
-      cupsPrinters.forEach((name, idx) => {
-        const id = `cups-${name}`;
-        // Se houver descrição, usa como nome amigável
-        const friendlyName = descriptions[name] || name;
-        if (!this.printers.has(id)) {
-          this.printers.set(id, {
-            id,
-            name: friendlyName,
-            queueName: name,
-            type: 'cups',
-            status: 'ready'
-          });
-        }
-      });
-      logger.info(`${cupsPrinters.length} impressora(s) detectadas via CUPS: [${cupsPrinters.join(', ')}]`);
+
+      this.printers = nextPrinters;
+      this._lastDiscoveryAt = Date.now();
+      return this.getPrinters();
     } catch (error) {
       logger.error('Erro ao descobrir impressoras:', error);
+      return this.getPrinters();
+    } finally {
+      this._discoveryPromise = null;
     }
+    })();
+
+    return this._discoveryPromise;
   }
 
   startAutoDiscovery(interval = 10000) {
-    setInterval(() => {
-      this.discoverPrinters();
+    if (this._discoveryTimer) {
+      clearInterval(this._discoveryTimer);
+    }
+
+    this._discoveryTimer = setInterval(() => {
+      void this.discoverPrinters();
     }, interval);
+  }
+
+  stopAutoDiscovery() {
+    if (this._discoveryTimer) {
+      clearInterval(this._discoveryTimer);
+      this._discoveryTimer = null;
+    }
   }
 
   getPrinters() {
@@ -319,7 +340,21 @@ class PrinterManager extends EventEmitter {
     });
   }
 
-  async print(printerId, orderData, printType = 'counter', rawContent = null) {
+  async print(printerIdOrOptions, orderDataArg, printTypeArg = 'counter', rawContentArg = null) {
+    let printerId = printerIdOrOptions;
+    let orderData = orderDataArg;
+    let printType = printTypeArg;
+    let rawContent = rawContentArg;
+    let printSettings = null;
+
+    if (typeof printerIdOrOptions === 'object' && printerIdOrOptions !== null) {
+      printerId = printerIdOrOptions.printer;
+      orderData = printerIdOrOptions.orderData;
+      printType = printerIdOrOptions.printType || 'counter';
+      rawContent = printerIdOrOptions.rawContent || null;
+      printSettings = printerIdOrOptions.printSettings || null;
+    }
+
     // localizar impressora por id ou por nome/queueName
     let printer = this.printers.get(printerId);
     if (!printer) {
@@ -350,6 +385,11 @@ class PrinterManager extends EventEmitter {
         logger.warn('[PRINT] Falha ao processar rawContent, fallback para formatador interno:', e.message);
         printBuffer = null;
       }
+    }
+
+    if (!printBuffer && orderData && typeof orderData.text === 'string') {
+      printBuffer = formatManualTextPrint(orderData.text, printSettings);
+      logger.info(`[PRINT] Texto manual formatado em 58mm compacto (tamanho): ${printBuffer.length} bytes`);
     }
 
     if (!printBuffer) {

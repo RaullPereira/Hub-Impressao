@@ -11,8 +11,30 @@ class TrayManager {
     this.createTray();
   }
 
+  loadIcon(iconPath) {
+    const ext = path.extname(iconPath).toLowerCase();
+    if (ext === '.svg') {
+      try {
+        return nativeImage.createFromBuffer(fs.readFileSync(iconPath));
+      } catch (error) {
+        logger.warn('Tray SVG icon load failed', error && error.message ? error.message : error);
+      }
+    }
+
+    let icon = nativeImage.createFromPath(iconPath);
+    if (icon.isEmpty() && fs.existsSync(iconPath)) {
+      try {
+        icon = nativeImage.createFromBuffer(fs.readFileSync(iconPath));
+      } catch (error) {
+        logger.warn('Tray icon createFromBuffer failed', error && error.message ? error.message : error);
+      }
+    }
+
+    return icon;
+  }
+
   createTray() {
-    // Select platform-appropriate icon paths and prefer template PNG on macOS
+    // Select platform-appropriate icon paths.
     const candidates = [];
     const basePath = app.isPackaged ? path.join(process.resourcesPath, 'assets', 'icons') : path.join(__dirname, '../../assets/icons');
 
@@ -23,8 +45,10 @@ class TrayManager {
       candidates.push(path.join(basePath, 'app.icns'));
       candidates.push(path.join(basePath, 'printer-svgrepo-com.svg'));
     } else if (process.platform === 'win32') {
-      candidates.push(path.join(basePath, 'app.ico'));
+      candidates.push(path.join(basePath, 'app.png'));
       candidates.push(path.join(basePath, 'tray.png'));
+      candidates.push(path.join(basePath, 'app.ico'));
+      candidates.push(path.join(basePath, 'tray-win.svg'));
       candidates.push(path.join(basePath, 'printer-svgrepo-com.svg'));
     } else {
       // linux / others
@@ -38,22 +62,13 @@ class TrayManager {
       iconPath = path.join(__dirname, '../../assets/icons/printer-svgrepo-com.svg');
     }
 
-    let trayIcon = nativeImage.createFromPath(iconPath);
-    if (trayIcon.isEmpty && fs.existsSync(iconPath)) {
-      // try read buffer fallback
-      try {
-        const buf = fs.readFileSync(iconPath);
-        trayIcon = nativeImage.createFromBuffer(buf);
-      } catch (e) {
-        logger.warn('Tray icon createFromBuffer failed', e && e.message ? e.message : e);
-      }
-    }
+    let trayIcon = this.loadIcon(iconPath);
 
     if (trayIcon.isEmpty()) {
       logger.warn('Tray icon is empty for path: ' + String(iconPath));
     }
 
-    // Resize tray icon; no template no macOS para o ícone aparecer com o desenho (evita quadrado branco)
+    // Resize tray icon; on Windows prefer PNG sources for better compatibility with older shells.
     if (process.platform === 'darwin') {
       try {
         trayIcon = trayIcon.resize({ width: 22, height: 22 });
@@ -61,9 +76,15 @@ class TrayManager {
       } catch (e) {
         logger.warn('Failed to resize tray icon', e && e.message ? e.message : e);
       }
+    } else if (process.platform === 'win32') {
+      try {
+        trayIcon = trayIcon.resize({ width: 20, height: 20 });
+      } catch (e) {
+        logger.warn('Failed to resize tray icon', e && e.message ? e.message : e);
+      }
     } else {
       try {
-        trayIcon = trayIcon.resize({ width: 32, height: 32 });
+        trayIcon = trayIcon.resize({ width: 24, height: 24 });
       } catch (e) {
         logger.warn('Failed to resize tray icon', e && e.message ? e.message : e);
       }

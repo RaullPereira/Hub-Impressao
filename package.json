@@ -1,6 +1,6 @@
 {
   "name": "hub-impressao",
-  "version": "1.6.2",
+  "version": "1.9.2",
   "description": "Serviço de impressão térmica em background",
   "author": "Pedidos Hub",
   "publishConfig": {
@@ -73,12 +73,14 @@
     ],
     "mac": {
       "icon": "assets/icons/app.icns",
+      "identity": null,
       "target": [
         "zip",
         "pkg"
       ],
       "category": "public.app-category.utilities"
     },
+    "afterPack": "scripts/after-pack-mac-adhoc.js",
     "win": {
       "icon": "assets/icons/app.ico",
       "target": [
@@ -93,6 +95,7 @@
       "requestedExecutionLevel": "asInvoker"
     },
     "nsis": {
+      "artifactName": "Hub-Impressao-Setup-${version}.${ext}",
       "oneClick": false,
       "perMachine": true,
       "allowToChangeInstallationDirectory": true,

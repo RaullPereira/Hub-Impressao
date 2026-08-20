@@ -2145,7 +2145,9 @@ class PairedPrintListener {
       if (autoPrintMap) {
         // Modo per-printer: roteia cada via aplicavel apenas para sua impressora
         // explicita, reivindica o ledger por printer_type (exactly-once por via) e
-        // pula vias sem impressora configurada (sem fallback para default).
+        // ignora somente vias nao configuradas. Uma via configurada mas
+        // temporariamente indisponivel retorna retry, sem fallback e sem marcar
+        // o pedido como processado.
         const perPrinterOutcome = await this.autoPrintPerPrinter(
           order,
           orderId,
@@ -2317,9 +2319,10 @@ class PairedPrintListener {
 
   // Auto-print por impressora (modo per-printer). Espelha buildAutoPrintTargets do
   // frontend: monta as vias aplicaveis a partir do sub-mapa autoPrint + tipo do pedido,
-  // imprime cada via exatamente uma vez na sua impressora explicita e PULA vias sem
-  // impressora resolvida (sem fallback para default). O ledger e reivindicado por
-  // printer_type para que cada via seja exactly-once de forma independente.
+  // imprime cada via exatamente uma vez na sua impressora explicita. Uma via
+  // configurada sem impressora resolvida fica elegivel para recovery: retorna retry,
+  // sem fallback e sem marcar processed. O ledger e reivindicado por printer_type
+  // para que cada via seja exactly-once de forma independente.
   async autoPrintPerPrinter(order, orderId, autoPrintMap, source, telemetryContext = null) {
     const activeTelemetry = telemetryContext || this.createAutoPrintTelemetryContext(order, source);
     await this.refreshPrintersIfNeeded();

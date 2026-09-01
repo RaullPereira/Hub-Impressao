@@ -12,6 +12,9 @@ out/**
 release/
 release/**
 
+# Worktrees locais de implementacao
+.worktrees/
+
 # Instaladores
 *.exe
 *.dmg

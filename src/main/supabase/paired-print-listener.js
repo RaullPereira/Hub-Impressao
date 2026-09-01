@@ -414,6 +414,7 @@ class PairedPrintListener {
     this.supabase = null;
     this.hasInjectedAutoPrintIntentClient = options.autoPrintIntentClient != null;
     this.autoPrintIntentClient = options.autoPrintIntentClient || null;
+    this.safePrintActivation = options.safePrintActivation || null;
     this.consumerId = typeof options.consumerId === 'string' && options.consumerId.trim()
       ? options.consumerId.trim()
       : PROCESS_AUTO_PRINT_CONSUMER_ID;
@@ -450,6 +451,18 @@ class PairedPrintListener {
     this.lastSettingsRefreshAt = 0;
     this.lastRecoveryRunAt = 0;
     this.lastPrinterRefreshAt = 0;
+  }
+
+  ensureSafePrintActivation(adminClientId = this.currentPairing?.adminClientId) {
+    if (!this.safePrintActivation || !adminClientId) return null;
+    return this.safePrintActivation.getOrCreate(adminClientId);
+  }
+
+  allowsAutomaticCandidate(candidateIso, adminClientId = this.currentPairing?.adminClientId) {
+    if (!this.safePrintActivation) return true;
+    if (!adminClientId) return false;
+    this.ensureSafePrintActivation(adminClientId);
+    return this.safePrintActivation.allows(adminClientId, candidateIso);
   }
 
   setPrinterManager(printerManager) {
@@ -1012,6 +1025,7 @@ class PairedPrintListener {
   async startWithPairing(pairing, options = {}) {
     const { recoverMissedOrders = true } = options;
 
+    this.ensureSafePrintActivation(pairing?.adminClientId);
     await this.stop();
     const connectionAttemptId = this.connectionAttemptId + 1;
     this.connectionAttemptId = connectionAttemptId;
@@ -1348,12 +1362,16 @@ class PairedPrintListener {
       defaultLookbackMs: RECOVERY_LOOKBACK_MS,
       maxAutomaticAgeMs: AUTO_PRINT_RECOVERY_MAX_AGE_MS
     });
-    logger.info(`${this.getLogContext()} Recuperando pedidos desde ${recoveryWindow.sinceIso}`);
+    const activation = this.ensureSafePrintActivation();
+    const safeSinceIso = activation?.safeActivationAt && Date.parse(activation.safeActivationAt) > Date.parse(recoveryWindow.sinceIso)
+      ? activation.safeActivationAt
+      : recoveryWindow.sinceIso;
+    logger.info(`${this.getLogContext()} Recuperando pedidos desde ${safeSinceIso}`);
 
     const { orders: recentOrders, pageCount } = await fetchRecoveryOrders({
       supabase: this.supabase,
       adminClientId: this.currentPairing.adminClientId,
-      sinceIso: recoveryWindow.sinceIso,
+      sinceIso: safeSinceIso,
       untilIso: recoveryWindow.untilIso,
       pageSize: 50
     });
@@ -1361,6 +1379,7 @@ class PairedPrintListener {
 
     const eligibleOrders = (recentOrders || []).filter((order) => {
       if (!order?.id) return false;
+      if (!this.allowsAutomaticCandidate(order.created_at)) return false;
       if (isManualPrintOnlyOrder(order)) return false;
       if (isRecoveredOrderTooOld(order, recoveryReferenceMs)) return false;
       if (isOrderCancelled(order)) return false;
@@ -1402,7 +1421,7 @@ class PairedPrintListener {
     }
 
     logger.info(`${this.getLogContext()} [PRINT_RECOVERY] ${JSON.stringify({
-      sinceIso: recoveryWindow.sinceIso,
+      sinceIso: safeSinceIso,
       untilIso: recoveryWindow.untilIso,
       pageCount,
       found: recentOrders.length,
@@ -1551,6 +1570,16 @@ class PairedPrintListener {
     );
 
     for (const intent of intents) {
+      if (!this.allowsAutomaticCandidate(intent?.created_at)) {
+        await this.autoPrintIntentClient.settle(
+          intent.id,
+          intent.lease_token,
+          'attention',
+          'pre_activation_backlog'
+        );
+        continue;
+      }
+
       let result;
       try {
         const order = await this.loadOrderById(intent.order_id);
@@ -2192,6 +2221,10 @@ class PairedPrintListener {
     const telemetryContext = this.createAutoPrintTelemetryContext(order, source);
     if (!this.currentPairing?.adminClientId) return { outcome: 'skipped', reason: 'not_paired' };
     if (!order?.id) return { outcome: 'skipped', reason: 'missing_order_id' };
+    if (!this.allowsAutomaticCandidate(order.created_at)) {
+      logger.warn(`${this.getLogContext()} Pedido ${order.id} anterior ao corte seguro ignorado (fonte=${source}).`);
+      return { outcome: 'skipped', reason: 'pre_activation_backlog' };
+    }
     if (isManualPrintOnlyOrder(order)) {
       const orderId = String(order.id);
       this.forgetDeferredAcceptOrder(orderId);
@@ -2786,6 +2819,12 @@ class PairedPrintListener {
   async processPrintJob(job, source) {
     if (!this.currentPairing?.adminClientId || !this.supabase) return;
     if (!job?.id) return;
+
+    if (!this.allowsAutomaticCandidate(job.created_at)) {
+      logger.warn(`${this.getLogContext()} Print job ${job.id} anterior ao corte seguro marcado como failed sem envio.`);
+      await this.updatePrintJobStatus(job.id, 'failed');
+      return;
+    }
 
     if (source !== 'realtime_insert' && isRecoveredPrintJobTooOld(job)) {
       logger.warn(`${this.getLogContext()} Print job ${job.id} antigo ignorado na recuperação para evitar backlog de impressão.`);

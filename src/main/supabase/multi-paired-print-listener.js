@@ -1,6 +1,7 @@
 const Settings = require('../config/settings');
 const logger = require('../utils/logger');
 const PairedPrintListener = require('./paired-print-listener');
+const SafePrintActivation = require('./safe-print-activation');
 
 function normalizeAdminClientId(value) {
   if (typeof value !== 'string') return null;
@@ -9,9 +10,10 @@ function normalizeAdminClientId(value) {
 }
 
 class MultiPairedPrintListener {
-  constructor(printerManager) {
+  constructor(printerManager, options = {}) {
     this.printerManager = printerManager;
     this.listeners = new Map();
+    this.safePrintActivation = options.safePrintActivation || new SafePrintActivation();
   }
 
   setPrinterManager(printerManager) {
@@ -40,7 +42,8 @@ class MultiPairedPrintListener {
       const listener = new PairedPrintListener(this.printerManager, {
         adminClientId: normalizedAdminClientId,
         pairingStore: this.createPairingStore(normalizedAdminClientId),
-        storageKey: `hub-impressao-supabase-session:${normalizedAdminClientId}`
+        storageKey: `hub-impressao-supabase-session:${normalizedAdminClientId}`,
+        safePrintActivation: this.safePrintActivation
       });
       this.listeners.set(normalizedAdminClientId, listener);
     }

@@ -21,6 +21,7 @@ const {
 const { calculateRecoveryWindow } = require('./recovery-window');
 const { fetchRecoveryOrders } = require('./recovery-orders');
 const AutoPrintIntentClient = require('./auto-print-intent-client');
+const HUB_VERSION = require('../../../package.json').version;
 
 const HEARTBEAT_INTERVAL_MS = 15000;
 const WATCHDOG_INTERVAL_MS = 20000;
@@ -625,6 +626,7 @@ class PairedPrintListener {
       paired,
       active,
       controlsAutoPrint: paired && active,
+      version: HUB_VERSION,
       status: this.status,
       adminClientId: pairing?.adminClientId || null,
       appBaseUrl: pairing?.appBaseUrl || null,

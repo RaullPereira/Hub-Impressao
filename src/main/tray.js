@@ -102,10 +102,16 @@ class TrayManager {
     });
   }
 
+  refreshMenu() {
+    if (this.tray) this.tray.setContextMenu(this.buildMenu());
+  }
+
   buildMenu() {
     // Verificar se auto-start está ativado
     const loginSettings = app.getLoginItemSettings();
     const autoStartEnabled = loginSettings.openAtLogin;
+    const updateStatus = this.mainApp.getUpdateStatus ? this.mainApp.getUpdateStatus() : { state: 'idle' };
+    const updateReady = updateStatus.state === 'ready';
     
     return Menu.buildFromTemplate([
       {
@@ -140,6 +146,10 @@ class TrayManager {
         label: 'Reiniciar Serviço',
         click: () => app.relaunch() && app.exit(0)
       },
+      ...(updateReady ? [{
+        label: 'Reiniciar e atualizar agora',
+        click: () => this.mainApp.installUpdateNow()
+      }] : []),
       {
         label: 'Sair',
         click: () => {

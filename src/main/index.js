@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, Menu, nativeImage, powerMonitor } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
 const TrayManager = require('./tray');
@@ -13,6 +14,7 @@ const SecureWebSocketServer = require('./websocket/secure-server');
 const Settings = require('./config/settings');
 const logger = require('./utils/logger');
 const MultiPairedPrintListener = require('./supabase/multi-paired-print-listener');
+const UpdateManager = require('./update/update-manager');
 
 const startHidden = process.argv.includes('--hidden');
 const localHttpPort = getEnvPort('HUB_HTTP_PORT', 3001);
@@ -74,6 +76,7 @@ class ThermalPrintApp {
     this.printerManager = null;
     this.wss = null;
     this.pairedPrintListener = null;
+    this.updateManager = null;
     this.hasShutdown = false;
     this.lastResumeRecoveryAt = 0;
     this.serviceWatchdogTimer = null;
@@ -140,6 +143,20 @@ class ThermalPrintApp {
       this.startupIssues.push(`Tray do sistema: ${error.message}`);
     }
 
+    try {
+      this.updateManager = new UpdateManager({
+        autoUpdater,
+        isPackaged: app.isPackaged,
+        platform: process.platform,
+        logger,
+        onStatus: (status) => this.publishUpdateStatus(status)
+      });
+      logger.info('Atualizador automático preparado');
+    } catch (error) {
+      this.updateManager = null;
+      logger.warn('Atualizador automático indisponível sem bloquear o Hub:', error && error.message ? error.message : error);
+    }
+
     if (this.printerManager) {
       this.startServiceWatchdog();
     }
@@ -203,6 +220,44 @@ class ThermalPrintApp {
     });
   }
 
+  publishUpdateStatus(status) {
+    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+      this.mainWindow.webContents.send('update-status', status);
+    }
+    if (this.tray && typeof this.tray.refreshMenu === 'function') {
+      this.tray.refreshMenu();
+    }
+  }
+
+  startUpdateManager() {
+    if (!this.updateManager) return null;
+    return this.updateManager.start();
+  }
+
+  getUpdateStatus() {
+    return this.updateManager
+      ? this.updateManager.getStatus()
+      : {
+        state: 'idle',
+        currentVersion: app.getVersion(),
+        availableVersion: null,
+        readyVersion: null,
+        progressPercent: null,
+        transferredBytes: null,
+        totalBytes: null,
+        lastCheckedAt: null,
+        errorCode: null
+      };
+  }
+
+  checkForUpdates() {
+    return this.updateManager ? this.updateManager.checkNow() : Promise.resolve(this.getUpdateStatus());
+  }
+
+  installUpdateNow() {
+    return this.updateManager ? this.updateManager.installNow() : false;
+  }
+
   async shutdown() {
     if (this.hasShutdown) return;
     this.hasShutdown = true;
@@ -210,6 +265,10 @@ class ThermalPrintApp {
     if (this.serviceWatchdogTimer) {
       clearInterval(this.serviceWatchdogTimer);
       this.serviceWatchdogTimer = null;
+    }
+
+    if (this.updateManager) {
+      this.updateManager.dispose();
     }
 
     try {
@@ -326,6 +385,7 @@ app.whenReady().then(async () => {
   }
 
   setupAutoStart();
+  thermalApp.startUpdateManager();
 
   if (!startHidden || startupResult.success === false) {
     thermalApp.createConfigWindow();
@@ -516,6 +576,12 @@ ipcMain.handle('get-pairing-status', async () => {
 
   return thermalApp.pairedPrintListener.getStatus();
 });
+
+ipcMain.handle('get-update-status', async () => thermalApp.getUpdateStatus());
+
+ipcMain.handle('check-for-updates', async () => thermalApp.checkForUpdates());
+
+ipcMain.handle('install-update-now', async () => ({ installed: thermalApp.installUpdateNow() }));
 
 ipcMain.handle('get-auto-print-attention', async () => {
   if (!thermalApp.pairedPrintListener || typeof thermalApp.pairedPrintListener.getAutoPrintAttention !== 'function') {

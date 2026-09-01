@@ -214,7 +214,12 @@ class SecureWebSocketServer {
           ws.send(JSON.stringify({
             type: 'connected',
             message: 'Conectado ao serviço de impressão',
-            version: '1.9.4'
+            version: '1.9.5',
+            capabilities: {
+              durablePrintIntents: true,
+              safeActivationCutoff: true,
+              backgroundUpdates: true
+            }
           }));
         });
       } catch (error) {

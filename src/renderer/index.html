@@ -29,7 +29,7 @@
         <div class="status-badge online">
           <span class="pulse"></span> Sistema Online
         </div>
-        <div class="version">v1.9.4</div>
+        <div class="version">v1.9.5</div>
         <div class="support-block">
           <div class="support-label">Suporte</div>
           <a href="https://wa.me/5585984582196" class="support-link" target="_blank" rel="noopener">WhatsApp 85 98458-2196</a>
@@ -98,6 +98,17 @@
         <section class="route-panel auto-print-attention-panel" id="auto-print-attention" aria-live="polite">
           <div class="route-panel-title">Atenção na autoimpressão</div>
           <div class="route-panel-body">Verificando intenções que precisam de ação...</div>
+        </section>
+
+        <section class="route-panel update-panel" aria-live="polite">
+          <div class="route-panel-title">Atualizações do Hub</div>
+          <div class="route-panel-body update-panel-body">
+            <span id="update-status">Verificando estado da atualização...</span>
+            <div class="update-actions">
+              <button class="btn-tertiary" id="check-for-updates" type="button">Verificar agora</button>
+              <button class="btn-primary" id="install-update-now" type="button" hidden>Reiniciar e atualizar agora</button>
+            </div>
+          </div>
         </section>
 
         <div class="glass-panel">

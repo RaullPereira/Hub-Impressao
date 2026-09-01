@@ -617,6 +617,9 @@ class PairedPrintListener {
     const pairing = this.currentPairing || this.pairingStore.getPairing();
     const active = this.status === 'active';
     const paired = this.hasValidPairing(pairing);
+    const activation = pairing?.adminClientId && this.safePrintActivation
+      ? this.safePrintActivation.get(pairing.adminClientId)
+      : null;
 
     return {
       paired,
@@ -634,6 +637,13 @@ class PairedPrintListener {
       autoPrintRoutes: Array.isArray(this.printSettings.autoPrintRoutes) ? this.printSettings.autoPrintRoutes : ['counter'],
       autoPrintOnAcceptEnabled: this.printSettings.autoPrintOnAcceptEnabled === true,
       barPrintEnabled: this.printSettings.barPrintEnabled === true,
+      safeActivationAt: activation?.safeActivationAt || null,
+      safeActivationVersion: activation?.safeActivationVersion || null,
+      capabilities: {
+        durablePrintIntents: true,
+        safeActivationCutoff: Boolean(activation),
+        backgroundUpdates: true
+      },
       lastError: this.lastError
     };
   }

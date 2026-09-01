@@ -2,6 +2,7 @@ let refreshInterval = null;
 const PRINTER_DISCOVERY_TIMEOUT_MS = 10000;
 let lastSettings = null;
 let lastPairingStatus = null;
+let removeUpdateStatusListener = null;
 const AUTO_PRINT_ATTENTION_ERROR_LABELS = {
   spool_uncertain: 'Resultado da impressão incerto',
   network: 'Falha de rede local',
@@ -62,6 +63,16 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('log-type')?.addEventListener('change', () => {
     void loadLogs();
   });
+  document.getElementById('check-for-updates')?.addEventListener('click', () => {
+    void checkForUpdates();
+  });
+  document.getElementById('install-update-now')?.addEventListener('click', () => {
+    void installUpdateNow();
+  });
+
+  if (window.api?.onUpdateStatus) {
+    removeUpdateStatusListener = window.api.onUpdateStatus(renderUpdateStatus);
+  }
 
   void initializeScreen();
 
@@ -69,6 +80,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (refreshInterval) {
       clearInterval(refreshInterval);
       refreshInterval = null;
+    }
+    if (removeUpdateStatusListener) {
+      removeUpdateStatusListener();
+      removeUpdateStatusListener = null;
     }
   });
 });
@@ -78,6 +93,7 @@ async function initializeScreen() {
   await loadPrinters();
   await loadDashboardActivity();
   await loadAutoPrintAttention();
+  await loadUpdateStatus();
 
   if (refreshInterval) {
     clearInterval(refreshInterval);
@@ -92,6 +108,61 @@ async function initializeScreen() {
       void loadLogs();
     }
   }, 20000);
+}
+
+function renderUpdateStatus(status = {}) {
+  const statusEl = document.getElementById('update-status');
+  const installButton = document.getElementById('install-update-now');
+  if (!statusEl || !installButton) return;
+
+  const version = status.readyVersion || status.availableVersion || '';
+  const labels = {
+    idle: 'Hub atualizado. A verificação automática ocorre em segundo plano.',
+    checking: 'Verificando atualizações...',
+    available: `Atualização ${version} encontrada. Preparando download em segundo plano...`,
+    downloading: `Baixando atualização ${version}${Number.isFinite(status.progressPercent) ? ` · ${Math.round(status.progressPercent)}%` : ''}`,
+    ready: `Atualização pronta${version ? `: versão ${version}` : ''}. Será instalada ao fechar o Hub.`,
+    error: 'Não foi possível verificar agora. O Hub continua operando normalmente.'
+  };
+
+  statusEl.textContent = labels[status.state] || labels.idle;
+  installButton.hidden = status.state !== 'ready';
+  installButton.disabled = status.state !== 'ready';
+}
+
+async function loadUpdateStatus() {
+  try {
+    const status = window.api?.getUpdateStatus
+      ? await window.api.getUpdateStatus()
+      : { state: 'idle' };
+    renderUpdateStatus(status);
+  } catch {
+    renderUpdateStatus({ state: 'error' });
+  }
+}
+
+async function checkForUpdates() {
+  const button = document.getElementById('check-for-updates');
+  if (button) button.disabled = true;
+  try {
+    const status = await window.api?.checkForUpdates?.();
+    if (status) renderUpdateStatus(status);
+  } catch {
+    renderUpdateStatus({ state: 'error' });
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function installUpdateNow() {
+  const button = document.getElementById('install-update-now');
+  if (button) button.disabled = true;
+  try {
+    await window.api?.installUpdateNow?.();
+  } catch {
+    renderUpdateStatus({ state: 'error' });
+    if (button) button.disabled = false;
+  }
 }
 
 function getActiveStorePrinters(settings, pairingStatus) {

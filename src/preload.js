@@ -6,6 +6,14 @@ contextBridge.exposeInMainWorld('api', {
   testPrinter: (printerName) => ipcRenderer.invoke('test-printer', printerName),
   getLogs: (options) => ipcRenderer.invoke('get-logs', options),
   getPairingStatus: () => ipcRenderer.invoke('get-pairing-status'),
+  getUpdateStatus: () => ipcRenderer.invoke('get-update-status'),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  installUpdateNow: () => ipcRenderer.invoke('install-update-now'),
+  onUpdateStatus: (listener) => {
+    const handler = (_event, status) => listener(status);
+    ipcRenderer.on('update-status', handler);
+    return () => ipcRenderer.removeListener('update-status', handler);
+  },
   getAutoPrintAttention: () => ipcRenderer.invoke('get-auto-print-attention'),
   resolveAutoPrintIntent: (intentId, action) =>
     ipcRenderer.invoke('resolve-auto-print-intent', { intentId, action }),

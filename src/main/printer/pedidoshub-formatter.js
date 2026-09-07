@@ -49,6 +49,8 @@ const DEFAULT_PRINT_SETTINGS = {
   autoPrintEnabled: false,
   autoPrintType: 'counter',
   autoPrintOnAcceptEnabled: false,
+  kdsReadyPrintEnabled: false,
+  kdsReadyPrintRoutes: [],
   highlightBeverages: true
 };
 

@@ -44,14 +44,20 @@ try {
     autoPrintEnabled: true,
     autoPrintType: 'kitchen',
     autoPrintOnAcceptEnabled: true,
+    kdsReadyPrintEnabled: true,
+    kdsReadyPrintRoutes: ['counter', 'kitchen'],
   });
 
   assert.strictEqual(listener.getStatus().autoPrintOnAcceptEnabled, true);
+  assert.strictEqual(listener.getStatus().kdsReadyPrintEnabled, true);
+  assert.deepStrictEqual(listener.getStatus().kdsReadyPrintRoutes, ['counter', 'kitchen']);
 
   const multi = new MultiPairedPrintListener(null);
   multi.listeners.set('store-1', listener);
   assert.strictEqual(multi.getStatus('store-1').autoPrintOnAcceptEnabled, true);
+  assert.strictEqual(multi.getStatus('store-1').kdsReadyPrintEnabled, true);
   assert.strictEqual(multi.getStatus().pairings[0].autoPrintOnAcceptEnabled, true);
+  assert.deepStrictEqual(multi.getStatus().pairings[0].kdsReadyPrintRoutes, ['counter', 'kitchen']);
 
   console.log('pairing status tests passed');
 } finally {

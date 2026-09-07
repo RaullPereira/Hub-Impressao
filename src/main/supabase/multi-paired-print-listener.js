@@ -68,6 +68,8 @@ class MultiPairedPrintListener {
         autoPrintEnabled: false,
         autoPrintType: 'counter',
         autoPrintOnAcceptEnabled: false,
+        kdsReadyPrintEnabled: false,
+        kdsReadyPrintRoutes: [],
         lastError: null
       };
     }
@@ -94,6 +96,8 @@ class MultiPairedPrintListener {
       autoPrintEnabled: false,
       autoPrintType: 'counter',
       autoPrintOnAcceptEnabled: false,
+      kdsReadyPrintEnabled: false,
+      kdsReadyPrintRoutes: [],
       lastError: null
     };
   }
@@ -183,6 +187,8 @@ class MultiPairedPrintListener {
       autoPrintEnabled: pairings.length === 1 ? firstPairing.autoPrintEnabled : false,
       autoPrintType: pairings.length === 1 ? firstPairing.autoPrintType : 'counter',
       autoPrintOnAcceptEnabled: pairings.length === 1 ? firstPairing.autoPrintOnAcceptEnabled : false,
+      kdsReadyPrintEnabled: pairings.length === 1 ? firstPairing.kdsReadyPrintEnabled : false,
+      kdsReadyPrintRoutes: pairings.length === 1 && Array.isArray(firstPairing.kdsReadyPrintRoutes) ? firstPairing.kdsReadyPrintRoutes : [],
       lastError: null,
       pairedCount,
       activeCount,

@@ -570,6 +570,8 @@ ipcMain.handle('get-pairing-status', async () => {
       autoPrintEnabled: false,
       autoPrintType: 'counter',
       autoPrintOnAcceptEnabled: false,
+      kdsReadyPrintEnabled: false,
+      kdsReadyPrintRoutes: [],
       lastError: 'Listener de pareamento indisponível'
     };
   }

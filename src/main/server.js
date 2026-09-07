@@ -477,6 +477,8 @@ class Server {
             autoPrintEnabled: false,
             autoPrintType: 'counter',
             autoPrintOnAcceptEnabled: false,
+            kdsReadyPrintEnabled: false,
+            kdsReadyPrintRoutes: [],
             barPrintEnabled: false,
             lastError: 'Listener de pareamento indisponível'
           };

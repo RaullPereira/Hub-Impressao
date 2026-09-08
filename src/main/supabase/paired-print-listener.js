@@ -112,6 +112,15 @@ function isManualPrintOnlyOrder(order) {
   );
 }
 
+function isKdsReadyPrintJob(job) {
+  return job?.content?.trigger === 'kds_ready';
+}
+
+function shouldProcessQueuedPrintJob(printSettings, job) {
+  if (printSettings?.autoPrintEnabled === true) return true;
+  return printSettings?.kdsReadyPrintEnabled === true && isKdsReadyPrintJob(job);
+}
+
 // Detecta se o pedido e do tipo delivery. Espelha o isDeliveryOrder do frontend
 // (order_type / delivery_type === 'delivery'); o formatter ja usa order_type/orderType.
 function isDeliveryOrder(order) {
@@ -321,6 +330,10 @@ function mapPrintSettingsFromDB(data) {
       barPrintEnabled: data?.bar_print_enabled === true
     }).map((entry) => entry.route),
     autoPrintOnAcceptEnabled: data?.auto_print_on_accept_enabled === true,
+    kdsReadyPrintEnabled: data?.kds_ready_print_enabled === true,
+    kdsReadyPrintRoutes: Array.isArray(data?.kds_ready_print_routes)
+      ? data.kds_ready_print_routes.filter((route) => route === 'counter' || route === 'kitchen')
+      : [],
     barPrintEnabled: data?.bar_print_enabled === true
   };
 }
@@ -579,6 +592,8 @@ class PairedPrintListener {
       autoPrintType: this.printSettings.autoPrintType || 'counter',
       autoPrintRoutes: Array.isArray(this.printSettings.autoPrintRoutes) ? this.printSettings.autoPrintRoutes : ['counter'],
       autoPrintOnAcceptEnabled: this.printSettings.autoPrintOnAcceptEnabled === true,
+      kdsReadyPrintEnabled: this.printSettings.kdsReadyPrintEnabled === true,
+      kdsReadyPrintRoutes: Array.isArray(this.printSettings.kdsReadyPrintRoutes) ? this.printSettings.kdsReadyPrintRoutes : [],
       barPrintEnabled: this.printSettings.barPrintEnabled === true,
       lastError: this.lastError
     };
@@ -2585,11 +2600,12 @@ class PairedPrintListener {
     this.trimRuntimeCache(this.processingJobIds);
 
     let claimedJob = false;
+    let orderProcessingKey = null;
 
     try {
       await this.refreshPrintSettings();
-      if (!this.printSettings.autoPrintEnabled) {
-        logger.info(`${this.getLogContext()} Auto print desativado. Print job ${jobId} ignorado enquanto a loja estiver desligada.`);
+      if (!shouldProcessQueuedPrintJob(this.printSettings, job)) {
+        logger.info(`${this.getLogContext()} Print job ${jobId} ignorado: não pertence ao modo automático ativo da loja.`);
         return;
       }
 
@@ -2599,7 +2615,15 @@ class PairedPrintListener {
       }
 
       const orderId = String(job.order_id);
-      if (this.processedOrderIds.has(orderId)) {
+      const requestedType = job.printer_type === 'kitchen' || job.printer_type === 'both' || job.printer_type === 'bar'
+        ? job.printer_type
+        : 'counter';
+      const isKdsReadyJob = isKdsReadyPrintJob(job);
+      orderProcessingKey = isKdsReadyJob
+        ? `${orderId}:kds_ready:${requestedType}`
+        : orderId;
+
+      if (this.processedOrderIds.has(orderProcessingKey)) {
         // Pedido já foi impresso por outro fluxo desta instância — só promove o job (best-effort).
         await this.claimPrintJob(jobId).catch(() => null);
         this.processedJobIds.add(jobId);
@@ -2607,12 +2631,12 @@ class PairedPrintListener {
         return;
       }
 
-      if (this.processingOrderIds.has(orderId)) {
-        logger.info(`[Pairing] Print job ${jobId} ignorado por enquanto: pedido ${orderId} já está em impressão local.`);
+      if (this.processingOrderIds.has(orderProcessingKey)) {
+        logger.info(`[Pairing] Print job ${jobId} ignorado por enquanto: pedido/via ${orderProcessingKey} já está em impressão local.`);
         return;
       }
 
-      if (await this.isOrderAlreadyPrinted(orderId)) {
+      if (!isKdsReadyJob && await this.isOrderAlreadyPrinted(orderId)) {
         await this.claimPrintJob(jobId).catch(() => null);
         this.processedJobIds.add(jobId);
         this.trimRuntimeCache(this.processedJobIds);
@@ -2630,12 +2654,8 @@ class PairedPrintListener {
       }
       claimedJob = true;
 
-      const requestedType = job.printer_type === 'kitchen' || job.printer_type === 'both' || job.printer_type === 'bar'
-        ? job.printer_type
-        : 'counter';
-
       logger.info(`[Pairing] Processando print job ${jobId} (fonte=${source}) para pedido ${orderId}`);
-      this.processingOrderIds.add(orderId);
+      this.processingOrderIds.add(orderProcessingKey);
       this.trimRuntimeCache(this.processingOrderIds);
 
       try {
@@ -2647,7 +2667,7 @@ class PairedPrintListener {
         if (printError?.printOutcomeUncertain === true) {
           // O claim ja marcou o job como impresso. Como o spool pode ter aceitado
           // o papel, preserva o status e os guards de memoria para nao reprocessar.
-          this.processedOrderIds.add(orderId);
+          this.processedOrderIds.add(orderProcessingKey);
           this.trimRuntimeCache(this.processedOrderIds);
           this.processedJobIds.add(jobId);
           this.trimRuntimeCache(this.processedJobIds);
@@ -2665,7 +2685,7 @@ class PairedPrintListener {
         throw printError;
       }
 
-      this.processedOrderIds.add(orderId);
+      this.processedOrderIds.add(orderProcessingKey);
       this.trimRuntimeCache(this.processedOrderIds);
       this.processedJobIds.add(jobId);
       this.trimRuntimeCache(this.processedJobIds);
@@ -2686,8 +2706,8 @@ class PairedPrintListener {
         }
       }
     } finally {
-      if (job?.order_id) {
-        this.processingOrderIds.delete(String(job.order_id));
+      if (orderProcessingKey) {
+        this.processingOrderIds.delete(orderProcessingKey);
       }
       this.processingJobIds.delete(jobId);
     }
@@ -2705,3 +2725,4 @@ class PairedPrintListener {
 }
 
 module.exports = PairedPrintListener;
+module.exports.shouldProcessQueuedPrintJob = shouldProcessQueuedPrintJob;

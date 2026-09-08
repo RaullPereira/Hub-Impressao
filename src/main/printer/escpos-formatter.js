@@ -72,10 +72,10 @@ function generateOrderPrintData(order, printType = 'counter') {
     data.push('\n');
     data.push(CMD.ALIGN_CENTER);
     data.push(CMD.TXT_BIG);
-    data.push(CMD.INVERSE_ON);
+    data.push(CMD.BOLD_ON);
     const total = (order.total || 0).toFixed(2).replace('.', ',');
     data.push(` TOTAL: R$ ${total} \n`);
-    data.push(CMD.INVERSE_OFF);
+    data.push(CMD.BOLD_OFF);
     data.push(CMD.TXT_NORMAL);
   }
   

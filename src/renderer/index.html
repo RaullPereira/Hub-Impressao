@@ -4,12 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Hub Impressão</title>
-  
-  <!-- Fonts -->
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
-  
+
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -30,7 +29,7 @@
         <div class="status-badge online">
           <span class="pulse"></span> Sistema Online
         </div>
-        <div class="version">v1.0.0</div>
+        <div class="version">v1.9.2</div>
         <div class="support-block">
           <div class="support-label">Suporte</div>
           <a href="https://wa.me/5585984582196" class="support-link" target="_blank" rel="noopener">WhatsApp 85 98458-2196</a>
@@ -40,12 +39,11 @@
     </aside>
 
     <main class="main-content">
-      <!-- Dashboard View -->
       <section id="dashboard" class="view active">
         <header class="view-header">
           <div>
             <h1>Visão Geral</h1>
-            <p>Monitoramento em tempo real do serviço de impressão</p>
+            <p>Status do serviço local, pareamento e rotas automáticas</p>
           </div>
           <div class="server-status">
             <span class="label">Servidor Local</span>
@@ -65,11 +63,11 @@
           </div>
           <div class="stat-card">
             <div class="icon-wrapper lime-light">
-              <span class="icon-letter">W</span>
+              <span class="icon-letter">L</span>
             </div>
             <div class="stat-info">
-              <span class="stat-value" id="ws-status">Ativo</span>
-              <span class="stat-label">WebSocket</span>
+              <span class="stat-value" id="pairing-store">Sem loja</span>
+              <span class="stat-label">Loja pareada</span>
             </div>
           </div>
           <div class="stat-card">
@@ -77,10 +75,24 @@
               <span class="icon-letter">A</span>
             </div>
             <div class="stat-info">
-              <span class="stat-value">API</span>
-              <span class="stat-label">Pronto</span>
+              <span class="stat-value" id="auto-owner">Verificando</span>
+              <span class="stat-label">Autoimpressão</span>
             </div>
           </div>
+          <div class="stat-card">
+            <div class="icon-wrapper lime-light">
+              <span class="icon-letter">R</span>
+            </div>
+            <div class="stat-info">
+              <span class="stat-value" id="route-summary">Cozinha / Atendimento</span>
+              <span class="stat-label">Rotas automáticas</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="route-panel" id="route-warnings">
+          <div class="route-panel-title">Rotas de impressão</div>
+          <div class="route-panel-body">Carregando configuração das rotas...</div>
         </div>
 
         <div class="glass-panel">
@@ -88,18 +100,16 @@
             <h3>Atividade Recente</h3>
           </div>
           <div id="dashboard-logs" class="activity-list">
-            <!-- Logs injected here -->
             <div class="empty-state">Nenhuma atividade recente</div>
           </div>
         </div>
       </section>
 
-      <!-- Printers View -->
       <section id="printers" class="view">
         <header class="view-header">
           <div>
             <h1>Gerenciar Impressoras</h1>
-            <p>Configure e teste seus dispositivos</p>
+            <p>Cozinha e Bar/Bebidas ficam separados; balcão, salão e delivery usam Atendimento</p>
           </div>
           <div class="view-actions">
             <button class="btn-primary" id="refresh-printers">Atualizar Lista</button>
@@ -109,7 +119,6 @@
 
         <div class="content-wrapper">
           <div id="printer-list" class="printer-grid">
-            <!-- Printer cards injected here -->
             <div class="loading-state">
               <div class="spinner"></div>
               <p>Buscando impressoras...</p>
@@ -135,24 +144,31 @@
               <select id="test-printer" class="custom-select">
                 <option value="">Selecione uma impressora...</option>
               </select>
-              <button class="btn-secondary" onclick="testPrint()">
-                Enviar Teste
-              </button>
+              <button class="btn-secondary" onclick="testPrint()">Enviar Teste</button>
             </div>
             <div id="settings-status" class="status-message"></div>
           </div>
         </div>
       </section>
 
-      <!-- Logs View (New dedicated view) -->
       <section id="logs" class="view">
         <header class="view-header">
-          <h1>Log do Sistema</h1>
+          <div>
+            <h1>Log do Sistema</h1>
+            <p>Acompanhe o histórico recente do agente local</p>
+          </div>
+          <div class="view-actions">
+            <select id="log-type" class="custom-select compact-select">
+              <option value="print">Impressão</option>
+              <option value="app">Aplicação</option>
+              <option value="error">Erros</option>
+            </select>
+            <button class="btn-primary" id="refresh-logs">Atualizar Logs</button>
+          </div>
         </header>
         <div class="glass-panel full-height">
-          <div id="full-logs" class="log-terminal">
-            <!-- Full logs -->
-          </div>
+          <div id="logs-filepath" class="log-meta"></div>
+          <div id="full-logs" class="log-terminal"></div>
         </div>
       </section>
     </main>

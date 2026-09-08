@@ -6,12 +6,12 @@ const logger = require('../utils/logger');
 
 class HybridPrinterManager {
   constructor() {
-    this.usbManager = new USBManager();
+    this.usbManager = new USBManager({ includeSystem: false });
     this.cupsManager = new CUPSManager();
     this.printers = new Map();
     this.lastDiscoveryTime = 0;
     this.discoveryInterval = null;
-    this.cacheTimeout = 5000; // Cache de 5 segundos para evitar descobertas frequentes
+    this.cacheTimeout = 10000; // Cache maior para aliviar notebooks menos potentes
     this.isDiscovering = false;
     
     // Descoberta inicial
@@ -19,7 +19,6 @@ class HybridPrinterManager {
   }
 
   startAutoDiscovery(interval = 30000) {
-    // Intervalo padrão aumentado para 30 segundos para melhor performance
     if (this.discoveryInterval) {
       clearInterval(this.discoveryInterval);
     }
@@ -29,14 +28,6 @@ class HybridPrinterManager {
     this.discoveryInterval = setInterval(() => {
       this.discoverPrinters(true); // silent mode
     }, interval);
-    
-    // Também inicia nos sub-managers se disponível
-    if (typeof this.usbManager.startAutoDiscovery === 'function') {
-      this.usbManager.startAutoDiscovery(interval);
-    }
-    if (os.platform() !== 'win32' && typeof this.cupsManager.startAutoDiscovery === 'function') {
-      this.cupsManager.startAutoDiscovery(interval);
-    }
   }
 
   stopAutoDiscovery() {
@@ -48,7 +39,6 @@ class HybridPrinterManager {
   }
 
   async discoverPrinters(silent = false) {
-    // Usa cache se a última descoberta foi recente
     const now = Date.now();
     if (this.isDiscovering || (now - this.lastDiscoveryTime < this.cacheTimeout && this.printers.size > 0)) {
       if (!silent) {
@@ -58,44 +48,42 @@ class HybridPrinterManager {
     }
     
     this.isDiscovering = true;
-    this.printers.clear();
-    
-    // USB printers (do manager.js) - pode incluir impressoras CUPS também
-    await this.usbManager.discoverPrinters();
-    for (const p of this.usbManager.getPrinters()) {
-      // Não adiciona prefixo se já tiver um
-      if (p.id.startsWith('usb-') || p.id.startsWith('cups-') || p.id.startsWith('network-')) {
-        this.printers.set(p.id, { ...p });
-      } else if (p.type === 'usb') {
-        this.printers.set('usb-' + p.id, { ...p, id: 'usb-' + p.id });
-      } else if (p.type === 'cups' || p.type === 'system') {
-        this.printers.set('cups-' + p.id, { ...p, id: 'cups-' + p.id });
-      } else {
-        this.printers.set(p.id, { ...p });
-      }
-    }
-    
-    // CUPS printers (only if not Windows) - do cups-manager dedicado
-    if (os.platform() !== 'win32') {
-      try {
-        await this.cupsManager.discoverPrinters();
-        for (const p of this.cupsManager.getPrinters()) {
-          const cupId = p.id.startsWith('cups-') ? p.id : 'cups-' + p.id;
-          // Evita duplicatas - CUPS manager tem prioridade para impressoras CUPS
-          if (!this.printers.has(cupId)) {
-            this.printers.set(cupId, { ...p, id: cupId, type: 'cups' });
-          }
+    const nextPrinters = new Map();
+
+    try {
+      await this.usbManager.discoverPrinters();
+      for (const p of this.usbManager.getPrinters()) {
+        if (p.id.startsWith('usb-') || p.id.startsWith('cups-') || p.id.startsWith('network-')) {
+          nextPrinters.set(p.id, { ...p });
+        } else if (p.type === 'usb') {
+          nextPrinters.set('usb-' + p.id, { ...p, id: 'usb-' + p.id });
+        } else if (p.type === 'cups' || p.type === 'system') {
+          nextPrinters.set('cups-' + p.id, { ...p, id: 'cups-' + p.id });
+        } else {
+          nextPrinters.set(p.id, { ...p });
         }
-      } catch (err) {
-        // Suprime erros do CUPS em sistemas não suportados
       }
-    }
-    
-    this.lastDiscoveryTime = Date.now();
-    this.isDiscovering = false;
-    
-    if (!silent) {
-      logger.info(`[HybridManager] Total de impressoras: ${this.printers.size}`);
+
+      if (os.platform() !== 'win32') {
+        try {
+          await this.cupsManager.discoverPrinters();
+          for (const p of this.cupsManager.getPrinters()) {
+            const cupId = p.id.startsWith('cups-') ? p.id : 'cups-' + p.id;
+            if (!nextPrinters.has(cupId)) {
+              nextPrinters.set(cupId, { ...p, id: cupId, type: 'cups' });
+            }
+          }
+        } catch (err) {}
+      }
+
+      this.printers = nextPrinters;
+      this.lastDiscoveryTime = Date.now();
+
+      if (!silent) {
+        logger.info(`[HybridManager] Total de impressoras: ${this.printers.size}`);
+      }
+    } finally {
+      this.isDiscovering = false;
     }
   }
 
@@ -150,7 +138,7 @@ class HybridPrinterManager {
 
   async print(printerIdOrOptions, orderData, printType) {
     // Aceita tanto print(printerId, orderData, printType) quanto print({ printer, orderData, rawContent, printType, useRawContent })
-    let printerId, rawContent, useRawContent;
+    let printerId, rawContent, useRawContent, resolvedPrintSettings;
     
     if (typeof printerIdOrOptions === 'object' && printerIdOrOptions !== null) {
       // Formato objeto: { printer, orderData, rawContent, printType, useRawContent }
@@ -159,6 +147,7 @@ class HybridPrinterManager {
       rawContent = printerIdOrOptions.rawContent;
       printType = printerIdOrOptions.printType;
       useRawContent = printerIdOrOptions.useRawContent;
+      resolvedPrintSettings = printerIdOrOptions.printSettings;
     } else {
       // Formato antigo: print(printerId, orderData, printType)
       printerId = printerIdOrOptions;
@@ -176,7 +165,8 @@ class HybridPrinterManager {
           orderData, 
           rawContent, 
           printType,
-          useRawContent 
+          useRawContent,
+          printSettings: resolvedPrintSettings
         });
       }
       throw new Error('Manager não tem método print');

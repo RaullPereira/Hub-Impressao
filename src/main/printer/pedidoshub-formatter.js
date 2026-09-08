@@ -15,6 +15,7 @@ const CMD = {
   medium_OFF: '\x1BE\x00',
   INVERSE_ON: '\x1D\x42\x01',
   INVERSE_OFF: '\x1D\x42\x00',
+  LINE_SPACING_TIGHT_58MM: '\x1B\x33\x0E',
   CUT_FULL: '\x1DV\x41\x00'
 };
 
@@ -48,6 +49,8 @@ const DEFAULT_PRINT_SETTINGS = {
   autoPrintEnabled: false,
   autoPrintType: 'counter',
   autoPrintOnAcceptEnabled: false,
+  kdsReadyPrintEnabled: false,
+  kdsReadyPrintRoutes: [],
   highlightBeverages: true
 };
 
@@ -87,6 +90,36 @@ function normalizeText(text) {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^\x20-\x7E\n\r]/g, '')
     .trim();
+}
+
+// Mapeia codigos tecnicos de forma de pagamento para rotulos legiveis.
+// O formatter imprime o valor cru em maiusculas; sem este mapa, codigos como
+// "employee_advance" sairiam como "EMPLOYEE_ADVANCE" na comanda.
+const PAYMENT_METHOD_PRINT_LABELS = {
+  'employee_advance': 'Vale de funcionario',
+  'employee advance': 'Vale de funcionario',
+  'vale_funcionario': 'Vale de funcionario',
+  'vale de funcionario': 'Vale de funcionario',
+  'voucher': 'Vale',
+  'vale': 'Vale',
+  'pix_online': 'PIX Online',
+  'mp_pix': 'PIX Online',
+  'paggpix_pix': 'PIX Online',
+  'credit_card': 'Cartao de Credito',
+  'debit_card': 'Cartao de Debito',
+  'money': 'Dinheiro',
+  'cash': 'Dinheiro',
+  'transfer': 'Transferencia',
+};
+
+function mapPaymentMethodPrintLabel(value) {
+  const raw = String(value == null ? '' : value).trim();
+  if (!raw) return raw;
+  const key = raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return PAYMENT_METHOD_PRINT_LABELS[key] || raw;
 }
 
 function getParsedPaymentSplits(order) {
@@ -147,6 +180,8 @@ function generateKitchenPrintData(order, printSettings) {
   const looksLikeTechnicalId = (value) => /^[a-z]{1,4}_|^\d{10,}$|_[0-9a-f]{8,}$/i.test(value || '');
 
   data.push(CMD.RESET);
+  // 58mm (<=32 col) ou config compact: espacamento de linha justo (ESC 3 14) para a comanda nao sair espacada nem grudada.
+  if ((settings.paperWidth || 48) <= 32 || settings.lineSpacing === "compact") data.push(CMD.LINE_SPACING_TIGHT_58MM);
   data.push(CMD.FONT_A);
 
   const orderNum = String(order.order_number || order.orderNumber || order.id || '0').padStart(3, '0');
@@ -226,13 +261,8 @@ function generateKitchenPrintData(order, printSettings) {
     const flavors = Array.isArray(item.flavors) && item.flavors.length > 0
       ? item.flavors
       : (Array.isArray(item.halfFlavors) && item.halfFlavors.length > 0 ? item.halfFlavors : []);
-
-    if (flavors.length === 1) {
-      const flavorName = flavors[0].name || flavors[0];
-      name = normalizeText(typeof flavorName === 'string' ? flavorName : name);
-    } else if (flavors.length > 1) {
-      name = `PIZZA ${flavors.length} SABORES`;
-    }
+    const hasFlavors = flavors.length > 0;
+    const isOrganizedPizzaBlock = hasFlavors;
 
     let size = item.sizeLabel || item.sizeName || item.size;
     if (size && looksLikeTechnicalId(size)) {
@@ -253,20 +283,31 @@ function generateKitchenPrintData(order, printSettings) {
     }
 
     data.push(CMD.medium_ON);
-    data.push(`${quantityLabel} ${sizeLabel}${name}\n`);
+    if (isOrganizedPizzaBlock) {
+      const sizeText = size ? `: ${normalizeText(size).toUpperCase()}` : '';
+      data.push(`${quantityLabel} PIZZA${sizeText}\n`);
+    } else {
+      data.push(`${quantityLabel} ${sizeLabel}${name}\n`);
+    }
     data.push(CMD.medium_OFF);
 
-    if (flavors.length > 1) {
+    const borderName = item.stuffed_crust_flavor || item.stuffedCrustFlavor || item.borderName || item.border?.name || (typeof item.border === 'string' ? item.border : null);
+    if (isOrganizedPizzaBlock && borderName) {
+      data.push(CMD.medium_ON);
+      data.push(`   BORDA: ${normalizeText(borderName)}\n`);
+      data.push(CMD.medium_OFF);
+    }
+
+    if (hasFlavors) {
       const count = flavors.length;
-      const fraction = count === 2 ? '1/2' : (count === 3 ? '1/3' : `1/${count}`);
+      const fraction = count === 2 ? '1/2 ' : (count === 3 ? '1/3 ' : (count > 3 ? `1/${count} ` : ''));
       flavors.forEach((flavor) => {
         const flavorName = typeof flavor === 'string' ? flavor : flavor.name || '';
-        data.push(`   ${fraction} ${normalizeText(flavorName)}\n`);
+        data.push(`   ${fraction}${normalizeText(flavorName)}\n`);
       });
     }
 
-    const borderName = item.stuffed_crust_flavor || item.stuffedCrustFlavor || item.borderName || item.border?.name || (typeof item.border === 'string' ? item.border : null);
-    if (borderName) {
+    if (!isOrganizedPizzaBlock && borderName) {
       data.push(CMD.medium_ON);
       data.push(`   BORDA: ${normalizeText(borderName)}\n`);
       data.push(CMD.medium_OFF);
@@ -447,6 +488,8 @@ function generateIfoodPrintData(order, printSettings) {
   const deliveryTime = deliveryTimeStr ? new Date(deliveryTimeStr) : new Date(created.getTime() + 40 * 60000);
 
   data.push(CMD.RESET);
+  // 58mm (<=32 col) ou config compact: espacamento de linha justo (ESC 3 14) para a comanda nao sair espacada nem grudada.
+  if ((settings.paperWidth || 48) <= 32 || settings.lineSpacing === "compact") data.push(CMD.LINE_SPACING_TIGHT_58MM);
   data.push(CMD.FONT_A);
   data.push('\n');
   data.push(CMD.FONT_A);
@@ -585,6 +628,8 @@ function generateIfoodPrintData(order, printSettings) {
   const legacySplits = getParsedPaymentSplits(order);
   if (paymentMethodName === 'mp_pix') paymentMethodName = 'PIX ONLINE';
   if (String(paymentMethodName).toUpperCase() === 'PENDING') paymentMethodName = 'A DEFINIR';
+  // Converte codigos tecnicos (ex.: employee_advance) em rotulo legivel.
+  paymentMethodName = mapPaymentMethodPrintLabel(paymentMethodName);
 
   const cardBrand = cd?.cardBrand;
   if (cardBrand) paymentMethodName = `${paymentMethodName} (${cardBrand})`;
@@ -600,7 +645,7 @@ function generateIfoodPrintData(order, printSettings) {
   if (legacySplits.length > 0) {
     data.push(padPair(settings, '| Pagamento dividido', '|'));
     legacySplits.forEach((split) => {
-      const splitName = normalizeText(split.method_name?.trim() || split.methodName?.trim() || split.method_id || '');
+      const splitName = normalizeText(mapPaymentMethodPrintLabel(split.method_name?.trim() || split.methodName?.trim() || split.method_id || ''));
       const splitPaid = split.paid === true ? ' [PAGO]' : ' [PENDENTE]';
       data.push(padPair(settings, `|   ${splitName}${splitPaid}`, `R$ ${fmtMoney(Number(split.amount) || 0)} |`));
     });
@@ -685,6 +730,8 @@ function generateCounterPrintData(order, printSettings) {
 
   const data = [];
   const cols = getPrinterCols(settings);
+  const is58mm = (settings.paperWidth || 48) <= 32;
+  const isCompactCounterLayout = is58mm;
   const separator = '='.repeat(cols) + '\n';
   const separatorFine = '-'.repeat(cols) + '\n';
   const orderType = order.order_type || order.orderType;
@@ -722,14 +769,20 @@ function generateCounterPrintData(order, printSettings) {
   };
 
   const pushSectionTitle = (title, withSpacing = true) => {
-    if (withSpacing) emptyLine();
+    const normalizedTitle = normalizeText(title).toUpperCase();
+    if (isCompactCounterLayout && normalizedTitle === 'ITENS') return;
+
+    if (withSpacing && !isCompactCounterLayout) emptyLine();
     data.push(CMD.medium_ON);
-    data.push(`${normalizeText(title).toUpperCase()}\n`);
+    data.push(`${normalizedTitle}\n`);
     data.push(CMD.medium_OFF);
+    if (isCompactCounterLayout) return;
     data.push(separatorFine);
   };
 
   data.push(CMD.RESET);
+  // 58mm (<=32 col) ou config compact: espacamento de linha justo (ESC 3 14) para a comanda nao sair espacada nem grudada.
+  if ((settings.paperWidth || 48) <= 32 || settings.lineSpacing === "compact") data.push(CMD.LINE_SPACING_TIGHT_58MM);
   data.push(CMD.FONT_A);
   data.push(CMD.ALIGN_CENTER);
 
@@ -749,7 +802,7 @@ function generateCounterPrintData(order, printSettings) {
     data.push(`Tel: ${settings.showStorePhone}\n`);
   }
 
-  data.push(separator);
+  if (!isCompactCounterLayout) data.push(separator);
 
   const isService = orderType === 'servico' || orderType === 'serviço';
   const orderNum = String(order.order_number || order.orderNumber || order.id || '0').padStart(3, '0');
@@ -762,7 +815,7 @@ function generateCounterPrintData(order, printSettings) {
   else if (scheduledAt) typeLabel = 'RETIRADA AGENDADA';
 
   if (!isService) {
-    data.push(CMD.TXT_BIG);
+    data.push(is58mm ? CMD.TXT_DOUBLE_H : CMD.TXT_BIG);
     data.push(`#${orderNum} ${typeLabel}\n`);
     data.push(CMD.TXT_NORMAL);
   }
@@ -799,13 +852,29 @@ function generateCounterPrintData(order, printSettings) {
       const neighborhood = order.neighborhood || '';
       const complement = order.complement || '';
       const reference = order.reference || '';
-      if (street) {
+      if (isCompactCounterLayout) {
+        if (street) {
+          const addressParts = [normalizeText(street)];
+          if (number) addressParts.push(normalizeText(number));
+          data.push(`END: ${addressParts.join(', ')}\n`);
+        }
+
+        const areaParts = [];
+        if (neighborhood) areaParts.push(`BAIRRO: ${normalizeText(neighborhood)}`);
+        if (complement) areaParts.push(`COMPL: ${normalizeText(complement)}`);
+        if (reference) areaParts.push(`REF: ${normalizeText(reference)}`);
+        if (areaParts.length > 0) {
+          const line = areaParts.join(' / ');
+          if (line.length <= cols) data.push(`${line}\n`);
+          else areaParts.forEach((part) => data.push(`${part}\n`));
+        }
+      } else if (street) {
         data.push(`RUA: ${normalizeText(street)}\n`);
         data.push(`NUMERO: ${normalizeText(number) || 'S/N'}\n`);
+        if (neighborhood) data.push(`BAIRRO: ${normalizeText(neighborhood)}\n`);
+        if (complement) data.push(`COMPL: ${normalizeText(complement)}\n`);
+        if (reference) data.push(`REF: ${normalizeText(reference)}\n`);
       }
-      if (neighborhood) data.push(`BAIRRO: ${normalizeText(neighborhood)}\n`);
-      if (complement) data.push(`COMPL: ${normalizeText(complement)}\n`);
-      if (reference) data.push(`REF: ${normalizeText(reference)}\n`);
     }
 
     data.push(separatorFine);
@@ -976,7 +1045,7 @@ function generateCounterPrintData(order, printSettings) {
       if (settings.showItemNotes && item.observations) {
         pushLabeledDetail('Obs:', normalizeText(item.observations));
       }
-      if (!isPromoChild) data.push(separatorFine);
+      if (!isPromoChild && !isCompactCounterLayout) data.push(separatorFine);
       return;
     }
 
@@ -1031,10 +1100,14 @@ function generateCounterPrintData(order, printSettings) {
     const hasPromotion = item.promotionId || item.promotion_id || item.promotionName || item.promotion_name;
     const categoryLower = String(category || '').toLowerCase();
     const isBeverage = ['refrigerantes', 'bebidas', 'sucos', 'vitaminas', 'drinks', 'agua', 'aguas', 'cervejas', 'vinhos', 'chopp', 'doses', 'latas', 'garrafas'].some((entry) => categoryLower.includes(entry));
+    const isOrganizedPizzaBlock = !isBeverage && hasFlavors;
 
     // Tamanho no início para pizzas, no fim (entre parênteses) para bebidas
     const sizePrefix = size && !isBeverage ? `[${normalizeText(size).toUpperCase()}] ` : '';
-    let itemLine = `${isPromoChild ? '  ' : ''}${quantityDisplay}${quantityDisplay ? ' ' : ''}${sizePrefix}${displayTitle}`;
+    const sizeText = size ? `: ${normalizeText(size).toUpperCase()}` : '';
+    let itemLine = isOrganizedPizzaBlock
+      ? `${isPromoChild ? '  ' : ''}${quantityDisplay}${quantityDisplay ? ' ' : ''}PIZZA${sizeText}`
+      : `${isPromoChild ? '  ' : ''}${quantityDisplay}${quantityDisplay ? ' ' : ''}${sizePrefix}${displayTitle}`;
     if (isBeverage && size) itemLine += ` (${normalizeText(size)})`;
 
     pushItemHeading(itemLine, settings.showItemPrice && (!hasPromotion || isPromoChild) ? `R$ ${fmtMoney(totalItem)}` : undefined);
@@ -1043,17 +1116,19 @@ function generateCounterPrintData(order, printSettings) {
       pushLabeledDetail('Valor Kg:', `R$ ${fmtMoney(unitPrice)}`);
     }
 
-    if (hasFlavors && flavors.length > 1) {
+    const borderName = item.stuffed_crust_flavor || item.stuffedCrustFlavor || item.borderName || item.border?.name || (typeof item.border === 'string' ? item.border : null);
+    if (isOrganizedPizzaBlock && borderName) pushLabeledDetail('Borda:', normalizeText(borderName));
+
+    if (hasFlavors) {
       const count = flavors.length;
-      const fraction = count === 2 ? '1/2' : (count === 3 ? '1/3' : `1/${count}`);
+      const fraction = count === 2 ? '1/2 ' : (count === 3 ? '1/3 ' : (count > 3 ? `1/${count} ` : ''));
       flavors.forEach((flavor) => {
         const flavorName = typeof flavor === 'string' ? flavor : flavor.name || '';
-        pushItemDetail(`${fraction} ${normalizeText(flavorName)}`);
+        pushItemDetail(`${fraction}${normalizeText(flavorName)}`);
       });
     }
 
-    const borderName = item.stuffed_crust_flavor || item.stuffedCrustFlavor || item.borderName || item.border?.name || (typeof item.border === 'string' ? item.border : null);
-    if (borderName) pushLabeledDetail('Borda:', normalizeText(borderName));
+    if (!isOrganizedPizzaBlock && borderName) pushLabeledDetail('Borda:', normalizeText(borderName));
 
     if (Array.isArray(item.extras) && item.extras.length > 0) {
       item.extras.forEach((extra) => pushItemDetail(`+ ${normalizeText(extra.name || extra)}`));
@@ -1110,7 +1185,7 @@ function generateCounterPrintData(order, printSettings) {
       pushLabeledDetail('Obs:', normalizeText(item.observations));
     }
 
-    if (!isPromoChild) data.push(separatorFine);
+    if (!isPromoChild && !isCompactCounterLayout) data.push(separatorFine);
   };
 
   groupedPromotions.forEach((items, promotionName) => {
@@ -1130,7 +1205,7 @@ function generateCounterPrintData(order, printSettings) {
         pushItemDetail(`+ ${quantity}x ${name}${sizeText}`, '    ');
       });
     }
-    data.push(separatorFine);
+    if (!isCompactCounterLayout) data.push(separatorFine);
   });
 
   Object.keys(itemsByCategory).sort().forEach((category) => {
@@ -1147,7 +1222,7 @@ function generateCounterPrintData(order, printSettings) {
     const beverageItems = (order.items || []).filter((item) => isBeverageCategory(resolveItemCategory(item)));
 
     if (beverageItems.length > 0) {
-      data.push(separatorFine);
+      if (!isCompactCounterLayout) data.push(separatorFine);
       data.push(CMD.ALIGN_CENTER);
       data.push(CMD.INVERSE_ON);
       data.push(CMD.TXT_BIG);
@@ -1178,7 +1253,7 @@ function generateCounterPrintData(order, printSettings) {
         data.push(CMD.TXT_NORMAL);
       });
 
-      data.push(separatorFine);
+      if (!isCompactCounterLayout) data.push(separatorFine);
     }
   }
 
@@ -1234,11 +1309,11 @@ function generateCounterPrintData(order, printSettings) {
       data.push(padPair(settings, `TAXA DE SERVICO${percentage}:`, `R$ ${fmtMoney(order.service_fee)}`));
     }
 
-    data.push(separatorFine);
+    if (!isCompactCounterLayout) data.push(separatorFine);
     data.push(CMD.ALIGN_CENTER);
-    data.push(CMD.TXT_BIG);
+    data.push(is58mm ? CMD.TXT_DOUBLE_H : CMD.TXT_BIG);
     data.push(CMD.medium_ON);
-    data.push(` TOTAL R$ ${fmtMoney(order.total)} \n`);
+    data.push(isCompactCounterLayout ? `TOTAL: R$ ${fmtMoney(order.total)}\n` : ` TOTAL R$ ${fmtMoney(order.total)} \n`);
     data.push(CMD.medium_OFF);
     data.push(CMD.TXT_NORMAL);
     data.push(CMD.ALIGN_LEFT);
@@ -1252,6 +1327,8 @@ function generateCounterPrintData(order, printSettings) {
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(paymentMethodRaw.trim())) {
       paymentMethodRaw = String(cd?.paymentMethodName || cd?.payment_method_name || 'Pagamento');
     }
+    // Converte codigos tecnicos (ex.: employee_advance) em rotulo legivel.
+    paymentMethodRaw = mapPaymentMethodPrintLabel(paymentMethodRaw);
     const paymentMethodLower = paymentMethodRaw.toLowerCase();
     const isSplitPayment =
       receiptSplits.length > 0 ||
@@ -1262,7 +1339,7 @@ function generateCounterPrintData(order, printSettings) {
     const isPaidOnline = paymentMethodLower === 'pix_online' || paymentMethodLower.includes('online') || paymentMethodLower.includes('pago');
     const isManuallyPaid = order.payment_status === 'paid';
 
-    data.push(separatorFine);
+    if (!isCompactCounterLayout) data.push(separatorFine);
 
     if (isPaidOnline) {
       data.push(CMD.ALIGN_CENTER);
@@ -1287,7 +1364,7 @@ function generateCounterPrintData(order, printSettings) {
       data.push(CMD.ALIGN_LEFT);
 
       receiptSplits.forEach((split) => {
-        const name = normalizeText(split.method_name?.trim() || split.methodName?.trim() || split.method_id || '');
+        const name = normalizeText(mapPaymentMethodPrintLabel(split.method_name?.trim() || split.methodName?.trim() || split.method_id || ''));
         const amount = `R$ ${fmtMoney(Number(split.amount) || 0)}`;
         const paidStatus = split.paid === true ? ' [PAGO]' : ' [PENDENTE]';
         data.push(CMD.medium_ON);
@@ -1306,13 +1383,23 @@ function generateCounterPrintData(order, printSettings) {
         data.push(CMD.ALIGN_LEFT);
       }
     } else {
-      data.push(CMD.ALIGN_CENTER);
-      data.push(CMD.TXT_DOUBLE_H);
-      data.push(CMD.medium_ON);
-      data.push(` ${normalizeText(paymentMethodRaw).toUpperCase()} \n`);
-      data.push(CMD.medium_OFF);
-      data.push(CMD.TXT_NORMAL);
-      data.push(CMD.ALIGN_LEFT);
+      if (isCompactCounterLayout) {
+        data.push(CMD.ALIGN_CENTER);
+        data.push(CMD.TXT_DOUBLE_H);
+        data.push(CMD.medium_ON);
+        data.push(`${normalizeText(paymentMethodRaw).toUpperCase()}\n`);
+        data.push(CMD.medium_OFF);
+        data.push(CMD.TXT_NORMAL);
+        data.push(CMD.ALIGN_LEFT);
+      } else {
+        data.push(CMD.ALIGN_CENTER);
+        data.push(CMD.TXT_DOUBLE_H);
+        data.push(CMD.medium_ON);
+        data.push(` ${normalizeText(paymentMethodRaw).toUpperCase()} \n`);
+        data.push(CMD.medium_OFF);
+        data.push(CMD.TXT_NORMAL);
+        data.push(CMD.ALIGN_LEFT);
+      }
 
       const changeFor = order.change_for || order.changeFor;
       if (changeFor > 0) {
@@ -1335,7 +1422,7 @@ function generateCounterPrintData(order, printSettings) {
     }
   }
 
-  data.push(separatorFine);
+  if (!isCompactCounterLayout) data.push(separatorFine);
   if (settings.showOperator !== false) {
     const operatorName = order.operator_name || order.operatorName || order.mesa_operator || order.mesaOperator;
     if (operatorName) data.push(`OPERADOR: ${normalizeText(operatorName)}\n`);
@@ -1343,9 +1430,10 @@ function generateCounterPrintData(order, printSettings) {
 
   data.push(CMD.ALIGN_CENTER);
   if (settings.customFooter) data.push(`${normalizeText(settings.customFooter)}\n`);
-  data.push('Pedidos Hub | @pedidoshub\n');
+  if (!isCompactCounterLayout) data.push('Pedidos Hub | @pedidoshub\n');
 
-  for (let i = 0; i < settings.feedLines; i++) data.push('\n');
+  const finalFeedLines = isCompactCounterLayout ? Math.min(settings.feedLines, 1) : settings.feedLines;
+  for (let i = 0; i < finalFeedLines; i++) data.push('\n');
   if (settings.autoCut) data.push(CMD.CUT_FULL);
 
   return data;

@@ -58,6 +58,7 @@ function makeListener(supabase) {
 
 function makeSupabaseMock({ jobs = [], orders = [] } = {}) {
   return {
+    auth: { getSession: async () => ({ data: { session: { access_token: 'test-token' } }, error: null }) },
     from(table) {
       const ctx = {
         table,

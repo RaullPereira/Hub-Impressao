@@ -58,6 +58,14 @@ try {
   assert.strictEqual(multi.getStatus().pairings[0].autoPrintOnAcceptEnabled, true);
   assert.strictEqual(multi.getStatus().kdsReadyPrintEnabled, true);
 
+  listener.printSettings.autoPrintEnabled = false;
+  assert.strictEqual(multi.isStoreAutoPrintEnabled('store-1'), false);
+  assert.strictEqual(multi.isStoreManualPrintEnabled('store-1'), true);
+
+  // Desativar o pareamento continua bloqueando a loja, mesmo no clique manual.
+  listener.currentPairing = { ...listener.pairingStore.getPairing(), enabled: false };
+  assert.strictEqual(multi.isStoreManualPrintEnabled('store-1'), false);
+
   console.log('pairing status tests passed');
 } finally {
   Module._load = originalLoad;

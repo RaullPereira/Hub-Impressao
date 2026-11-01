@@ -92,6 +92,26 @@ function normalizeText(text) {
     .trim();
 }
 
+function getComboChoiceLines(item) {
+  const children = Array.isArray(item?.comboItems) ? item.comboItems
+    : Array.isArray(item?.combo_items) ? item.combo_items
+      : Array.isArray(item?.subItems) ? item.subItems : [];
+
+  return children.map((child) => {
+    if (!child) return '';
+    const flavors = Array.isArray(child.flavors)
+      ? child.flavors.map((flavor) => normalizeText(typeof flavor === 'string' ? flavor : flavor?.name)).filter(Boolean)
+      : [];
+    const name = flavors.length ? flavors.join(' / ') : normalizeText(child.name || child.product_name);
+    if (!name) return '';
+    const quantity = Number(child.quantity) > 1 ? `${Number(child.quantity)}x ` : '';
+    const size = normalizeText(child.sizeLabel || child.sizeId || '');
+    const border = normalizeText(child.stuffedCrustFlavor || '');
+    const notes = normalizeText(child.notes || '');
+    return `${quantity}${name}${size ? ` (${size})` : ''}${border ? ` - borda ${border}` : ''}${notes ? ` - obs: ${notes}` : ''}`;
+  }).filter(Boolean);
+}
+
 // Mapeia codigos tecnicos de forma de pagamento para rotulos legiveis.
 // O formatter imprime o valor cru em maiusculas; sem este mapa, codigos como
 // "employee_advance" sairiam como "EMPLOYEE_ADVANCE" na comanda.
@@ -306,6 +326,10 @@ function generateKitchenPrintData(order, printSettings) {
         data.push(`   ${fraction}${normalizeText(flavorName)}\n`);
       });
     }
+
+    getComboChoiceLines(item).forEach((choice) => {
+      data.push(`   + ${choice}\n`);
+    });
 
     if (!isOrganizedPizzaBlock && borderName) {
       data.push(CMD.medium_ON);
@@ -1127,6 +1151,10 @@ function generateCounterPrintData(order, printSettings) {
         pushItemDetail(`${fraction}${normalizeText(flavorName)}`);
       });
     }
+
+    getComboChoiceLines(item).forEach((choice) => {
+      pushItemDetail(`+ ${choice}`);
+    });
 
     if (!isOrganizedPizzaBlock && borderName) pushLabeledDetail('Borda:', normalizeText(borderName));
 

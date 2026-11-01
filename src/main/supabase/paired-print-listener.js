@@ -91,10 +91,35 @@ function isOrderCancelled(order) {
 }
 
 function getOrderCustomData(order) {
-  const customData = order?.custom_data || order?.customData;
-  return customData && typeof customData === 'object' && !Array.isArray(customData)
-    ? customData
-    : {};
+  const parse = (value) => {
+    if (typeof value === 'string') {
+      try {
+        value = JSON.parse(value);
+      } catch {
+        return {};
+      }
+    }
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  };
+  const snakeCase = parse(order?.custom_data);
+  const camelCase = parse(order?.customData);
+  return {
+    ...snakeCase,
+    ...camelCase,
+    incomplete_draft: snakeCase.incomplete_draft === true || camelCase.incomplete_draft === true,
+    incomplete_draft_completed_at:
+      camelCase.incomplete_draft_completed_at || snakeCase.incomplete_draft_completed_at,
+  };
+}
+
+function isIncompleteOrderDraft(order) {
+  return getOrderCustomData(order).incomplete_draft === true;
+}
+
+function didCompleteIncompleteOrderDraft(previousOrder, nextOrder) {
+  if (!isIncompleteOrderDraft(previousOrder) || isIncompleteOrderDraft(nextOrder)) return false;
+  const completedAt = Date.parse(getOrderCustomData(nextOrder).incomplete_draft_completed_at || '');
+  return Number.isFinite(completedAt);
 }
 
 function wasAutoPrintedOffline(order) {
@@ -116,7 +141,29 @@ function isKdsReadyPrintJob(job) {
   return job?.content?.trigger === 'kds_ready';
 }
 
+// KDS profissional do Pedidos Hub: o super admin configura vias para imprimir
+// quando o pedido ENTRA numa coluna (ex.: Forno). O job so existe se a coluna
+// pediu impressao, entao e um pedido explicito: imprime com a auto-impressao
+// desligada e mesmo que a comanda ja tenha saido na chegada.
+function isKdsStationPrintJob(job) {
+  return job?.content?.trigger === 'kds_station';
+}
+
+function isExplicitKdsPrintJob(job) {
+  return isKdsReadyPrintJob(job) || isKdsStationPrintJob(job);
+}
+
+function getQueuedPrintJobProcessingKey(job, orderId, requestedType) {
+  if (isKdsStationPrintJob(job)) {
+    const stationId = String(job?.content?.station_id || job?.content?.stationId || 'station');
+    return `${orderId}:kds_station:${stationId}:${requestedType}`;
+  }
+  if (isKdsReadyPrintJob(job)) return `${orderId}:kds_ready:${requestedType}`;
+  return orderId;
+}
+
 function shouldProcessQueuedPrintJob(printSettings, job) {
+  if (isKdsStationPrintJob(job)) return true;
   if (printSettings?.autoPrintEnabled === true) return true;
   return printSettings?.kdsReadyPrintEnabled === true && isKdsReadyPrintJob(job);
 }
@@ -179,6 +226,12 @@ function isOlderThan(value, maxAgeMs, options = {}) {
 
 function isRecoveredOrderTooOld(order) {
   return isOlderThan(order?.created_at || order?.createdAt, AUTO_PRINT_RECOVERY_MAX_AGE_MS);
+}
+
+function isRecentDraftCompletion(order, sinceDate, now = Date.now()) {
+  if (isIncompleteOrderDraft(order)) return false;
+  const completedAt = Date.parse(getOrderCustomData(order).incomplete_draft_completed_at || '');
+  return Number.isFinite(completedAt) && completedAt >= sinceDate.getTime() && completedAt <= now;
 }
 
 function isRecoveredPrintJobTooOld(job) {
@@ -1113,6 +1166,11 @@ class PairedPrintListener {
             }
 
             if (payload.eventType === 'UPDATE') {
+              if (didCompleteIncompleteOrderDraft(payload.old, order)) {
+                logger.info(`${this.getLogContext()} Pedido #${order.order_number || order.id} rascunho concluído. Aplicando as regras atuais de impressão automática.`);
+                await this.handleAutoPrintOrder(order, 'realtime_update_completed_draft');
+              }
+
               if (
                 isPixOnlineOrder(order) &&
                 order.payment_status === 'paid' &&
@@ -1330,22 +1388,59 @@ class PairedPrintListener {
     const sinceIso = sinceDate.toISOString();
     logger.info(`${this.getLogContext()} Recuperando pedidos desde ${sinceIso}`);
 
-    const { data: recentOrders, error } = await this.supabase
-      .from('orders')
-      .select('*')
-      .eq('admin_client_id', this.currentPairing.adminClientId)
-      .gte('created_at', sinceIso)
-      .order('created_at', { ascending: true })
-      .limit(50);
+    const recoveryQueries = await Promise.allSettled([
+      this.supabase
+        .from('orders')
+        .select('*')
+        .eq('admin_client_id', this.currentPairing.adminClientId)
+        .gte('created_at', sinceIso)
+        .order('created_at', { ascending: true })
+        .limit(50),
+      this.supabase
+        .from('orders')
+        .select('*')
+        .eq('admin_client_id', this.currentPairing.adminClientId)
+        .gte('updated_at', sinceIso)
+        .order('updated_at', { ascending: true })
+        .limit(50),
+    ]);
 
-    if (error) {
-      throw error;
+    let recentOrders = [];
+    let updatedOrders = [];
+    let successfulQueries = 0;
+    recoveryQueries.forEach((result, index) => {
+      const label = index === 0 ? 'created_at' : 'updated_at';
+      if (result.status === 'rejected') {
+        logger.warn(`${this.getLogContext()} Falha na recuperação por ${label}:`, result.reason?.message || result.reason);
+        return;
+      }
+      if (result.value?.error) {
+        logger.warn(`${this.getLogContext()} Falha na recuperação por ${label}:`, result.value.error.message || result.value.error);
+        return;
+      }
+      successfulQueries += 1;
+      if (index === 0) recentOrders = result.value?.data || [];
+      else updatedOrders = result.value?.data || [];
+    });
+    if (successfulQueries === 0) {
+      const firstFailure = recoveryQueries.find((result) => result.status === 'rejected')?.reason;
+      throw firstFailure || new Error('Não foi possível recuperar pedidos recentes.');
     }
 
-    const eligibleOrders = (recentOrders || []).filter((order) => {
+    const now = Date.now();
+    const completedDrafts = (updatedOrders || []).filter((order) => isRecentDraftCompletion(order, sinceDate, now));
+    const ordersById = new Map();
+    (recentOrders || []).forEach((order) => {
+      if (order?.id) ordersById.set(String(order.id), order);
+    });
+    completedDrafts.forEach((order) => ordersById.set(String(order.id), order));
+
+    const eligibleOrders = Array.from(ordersById.values()).filter((order) => {
       if (!order?.id) return false;
+      if (isIncompleteOrderDraft(order)) return false;
       if (isManualPrintOnlyOrder(order)) return false;
-      if (isRecoveredOrderTooOld(order)) return false;
+      const isCompletedDraft = isRecentDraftCompletion(order, sinceDate, now);
+      if (!isCompletedDraft && isRecoveredOrderTooOld(order)) return false;
       if (isOrderCancelled(order)) return false;
       if (isPixOnlineOrder(order) && order.payment_status !== 'paid') return false;
       // Nao recuperar/imprimir pedidos do cardapio digital ainda aguardando aceite.
@@ -1429,6 +1524,11 @@ class PairedPrintListener {
     for (const order of orders || []) {
       const orderId = String(order.id);
 
+      if (isIncompleteOrderDraft(order)) {
+        this.forgetDeferredAcceptOrder(orderId);
+        continue;
+      }
+
       if (isManualPrintOnlyOrder(order)) {
         this.forgetDeferredAcceptOrder(orderId);
         continue;
@@ -1453,6 +1553,14 @@ class PairedPrintListener {
 
   async processPendingJobs() {
     if (!this.supabase || !this.currentPairing?.adminClientId) return;
+
+    // O pareamento salvo pode sobreviver ao SIGNED_OUT do cliente Supabase.
+    // Nunca consulte a fila como anon; o chamador reconecta e restaura a sessao.
+    const { data: sessionData, error: sessionError } = await this.supabase.auth.getSession();
+    if (sessionError) throw sessionError;
+    if (!sessionData?.session?.access_token) {
+      throw new Error('Sessão do serviço indisponível para recuperar a fila de impressão.');
+    }
 
     const cutoff = new Date(Date.now() - PENDING_PRINT_JOB_RECOVERY_MAX_AGE_MS).toISOString();
 
@@ -1522,46 +1630,46 @@ class PairedPrintListener {
     const printedAt = new Date().toISOString();
     const adminClientId = this.currentPairing.adminClientId;
 
-    // Tenta fazer UPDATE em job pendente/falho existente
-    const { data: updated } = await this.supabase
+    // Jobs "imprimir ao entrar na coluna" do KDS ficam fora do ledger da via:
+    // podem existir varios impressos para o mesmo pedido/via e nunca sao
+    // reaproveitados aqui (senao um job pendente da coluna sumiria sem papel).
+    const { data: candidates, error: existingError } = await this.supabase
       .from('print_jobs')
-      .update({ status: 'printed', printed_at: printedAt, printer_type: printerType })
+      .select('*')
       .eq('admin_client_id', adminClientId)
       .eq('order_id', orderId)
-      .in('status', ['pending', 'failed'])
-      .select()
-      .limit(1);
+      .eq('printer_type', printerType)
+      .in('status', ['printed', 'pending', 'failed'])
+      .order('created_at', { ascending: true })
+      .limit(50);
+    if (existingError) throw existingError;
+    const ledgerRows = (candidates || []).filter((row) => !isKdsStationPrintJob(row));
+    const existing = ledgerRows.find((row) => row.status === 'printed');
+    if (existing) return existing;
 
-    if (updated && updated.length > 0) {
-      return updated[0];
+    // Tenta fazer UPDATE em job pendente/falho existente
+    const reusable = ledgerRows.find((row) => row.status === 'pending' || row.status === 'failed');
+    if (reusable) {
+      const { data: updated, error: updateError } = await this.supabase
+        .from('print_jobs')
+        .update({ status: 'printed', printed_at: printedAt, printer_type: printerType })
+        .eq('id', reusable.id)
+        .in('status', ['pending', 'failed'])
+        .select()
+        .limit(1);
+
+      if (updateError) throw updateError;
+      if (updated && updated.length > 0) {
+        return updated[0];
+      }
     }
 
-    // Nenhum job pendente — insere direto com ON CONFLICT DO NOTHING.
-    // O índice único parcial (admin_client_id, order_id WHERE status='printed')
-    // garante atomicidade: só um processo vence, os demais retornam sem dados.
-    const { data, error } = await this.supabase
-      .from('print_jobs')
-      .insert({
-        admin_client_id: adminClientId,
-        order_id: orderId,
-        printer_type: printerType,
-        status: 'printed',
-        printed_at: printedAt
-      })
-      .select()
-      .single();
-
-    // Código 23505 = unique_violation — outro processo já registrou, tudo certo
-    if (error && error.code !== '23505') {
-      throw error;
-    }
-
-    return data || null;
+    return this.claimAutoPrintLedger(orderId, printerType);
   }
 
   // Reivindica atomicamente a impressão de um pedido ANTES do papel sair.
-  // O índice parcial idx_print_jobs_unique_printed_order (admin_client_id, order_id WHERE status='printed')
-  // garante que apenas um Hub vença a corrida — os demais recebem 23505 e abortam o print.
+  // A RPC usa ON CONFLICT DO NOTHING: apenas um Hub vence por loja/pedido/via.
+  // Os demais recebem uma lista vazia e abortam antes de enviar papel.
   // Tradeoff intencional: se o processo cair apos o claim e antes/durante o spool,
   // o ledger pode ficar como impresso sem papel. Priorizamos nao duplicar papel;
   // falhas observadas liberam apenas a via afetada, com duas tentativas no fluxo abaixo.
@@ -1569,26 +1677,14 @@ class PairedPrintListener {
   async claimAutoPrintLedger(orderId, printerType) {
     if (!this.supabase || !this.currentPairing?.adminClientId) return null;
 
-    const { data, error } = await this.supabase
-      .from('print_jobs')
-      .insert({
-        admin_client_id: this.currentPairing.adminClientId,
-        order_id: orderId,
-        printer_type: printerType,
-        status: 'printed',
-        printed_at: new Date().toISOString()
-      })
-      .select()
-      .single();
+    const { data, error } = await this.supabase.rpc('claim_auto_print_job', {
+      p_admin_client_id: this.currentPairing.adminClientId,
+      p_order_id: orderId,
+      p_printer_type: printerType
+    });
 
-    if (error) {
-      if (error.code === '23505') {
-        return null;
-      }
-      throw error;
-    }
-
-    return data;
+    if (error) throw error;
+    return Array.isArray(data) ? data[0] || null : data || null;
   }
 
   // Reverte um claim quando a impressão fisica falha — mantém o pedido elegível
@@ -2054,6 +2150,11 @@ class PairedPrintListener {
     const telemetryContext = this.createAutoPrintTelemetryContext(order, source);
     if (!this.currentPairing?.adminClientId) return;
     if (!order?.id) return;
+    if (isIncompleteOrderDraft(order)) {
+      this.forgetDeferredAcceptOrder(String(order.id));
+      logger.info(`${this.getLogContext()} Pedido #${order.order_number || order.id} incompleto; auto print ignorado.`);
+      return;
+    }
     if (isManualPrintOnlyOrder(order)) {
       const orderId = String(order.id);
       this.forgetDeferredAcceptOrder(orderId);
@@ -2618,10 +2719,8 @@ class PairedPrintListener {
       const requestedType = job.printer_type === 'kitchen' || job.printer_type === 'both' || job.printer_type === 'bar'
         ? job.printer_type
         : 'counter';
-      const isKdsReadyJob = isKdsReadyPrintJob(job);
-      orderProcessingKey = isKdsReadyJob
-        ? `${orderId}:kds_ready:${requestedType}`
-        : orderId;
+      const isExplicitKdsJob = isExplicitKdsPrintJob(job);
+      orderProcessingKey = getQueuedPrintJobProcessingKey(job, orderId, requestedType);
 
       if (this.processedOrderIds.has(orderProcessingKey)) {
         // Pedido já foi impresso por outro fluxo desta instância — só promove o job (best-effort).
@@ -2636,7 +2735,7 @@ class PairedPrintListener {
         return;
       }
 
-      if (!isKdsReadyJob && await this.isOrderAlreadyPrinted(orderId)) {
+      if (!isExplicitKdsJob && await this.isOrderAlreadyPrinted(orderId)) {
         await this.claimPrintJob(jobId).catch(() => null);
         this.processedJobIds.add(jobId);
         this.trimRuntimeCache(this.processedJobIds);
@@ -2726,3 +2825,6 @@ class PairedPrintListener {
 
 module.exports = PairedPrintListener;
 module.exports.shouldProcessQueuedPrintJob = shouldProcessQueuedPrintJob;
+module.exports.isKdsStationPrintJob = isKdsStationPrintJob;
+module.exports.isIncompleteOrderDraft = isIncompleteOrderDraft;
+module.exports.didCompleteIncompleteOrderDraft = didCompleteIncompleteOrderDraft;

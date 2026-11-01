@@ -72,9 +72,15 @@ function resolveConfiguredPrinterId(printerId, orderData, printType) {
   return Settings.getPrinterForType(resolvedType);
 }
 
-function isStorePrintEnabled(pairedPrintListener, adminClientId) {
+function isStorePrintEnabled(pairedPrintListener, adminClientId, isAutoPrint) {
   if (!pairedPrintListener || !adminClientId || typeof pairedPrintListener.isStoreAutoPrintEnabled !== 'function') {
     return true;
+  }
+
+  // O botão manual depende do pareamento da loja, não da opção de autoimpressão.
+  if (isAutoPrint !== true) {
+    return typeof pairedPrintListener.isStoreManualPrintEnabled !== 'function'
+      || pairedPrintListener.isStoreManualPrintEnabled(adminClientId);
   }
 
   return pairedPrintListener.isStoreAutoPrintEnabled(adminClientId);
@@ -284,7 +290,7 @@ class Server {
           `[PRINT] Job recebido requestId=${requestId} printer=${resolvedPrinterId || printerId || 'auto'} type=${printType || 'default'} textLength=${textLength}`
         );
 
-        if (!isStorePrintEnabled(this.pairedPrintListener, adminClientId)) {
+        if (!isStorePrintEnabled(this.pairedPrintListener, adminClientId, isAutoPrint)) {
           logger.info(`[PRINT] Job ignorado requestId=${requestId}: impressão desativada para loja ${adminClientId}`);
           return res.status(409).json({ success: false, error: 'Impressão desativada para esta loja' });
         }
@@ -359,7 +365,7 @@ class Server {
 
     this.app.post('/api/print/dispatch', async (req, res) => {
       try {
-        const { printerId, orderData, printType } = req.body;
+        const { printerId, orderData, printType, isAutoPrint } = req.body;
         const resolvedPrinterId = resolveConfiguredPrinterId(printerId, orderData, printType);
         const settings = Settings.getAll();
         const adminClientId = getOrderAdminClientId(orderData);
@@ -367,7 +373,7 @@ class Server {
 
         logger.info(`Dispatch print - channel=${settings.printChannel}`);
 
-        if (!isStorePrintEnabled(this.pairedPrintListener, adminClientId)) {
+        if (!isStorePrintEnabled(this.pairedPrintListener, adminClientId, isAutoPrint)) {
           logger.info(`[PRINT] Dispatch ignorado: impressão desativada para loja ${adminClientId}`);
           return res.status(409).json({ success: false, error: 'Impressão desativada para esta loja' });
         }
@@ -685,7 +691,7 @@ class Server {
               : data.printType;
 
             logger.info(`[PRINT] WebSocket request printer=${resolvedPrinterId || data.printerId || 'auto'} type=${data.printType || 'default'}`);
-            if (!isStorePrintEnabled(this.pairedPrintListener, adminClientId)) {
+            if (!isStorePrintEnabled(this.pairedPrintListener, adminClientId, data.isAutoPrint)) {
               logger.info(`[PRINT] WebSocket ignorado: impressão desativada para loja ${adminClientId}`);
               ws.send(JSON.stringify({ type: 'ERROR', message: 'Impressão desativada para esta loja' }));
               return;

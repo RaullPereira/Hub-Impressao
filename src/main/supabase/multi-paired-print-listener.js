@@ -126,6 +126,14 @@ class MultiPairedPrintListener {
     }
   }
 
+  isStoreManualPrintEnabled(adminClientId) {
+    const normalizedAdminClientId = normalizeAdminClientId(adminClientId);
+    if (!normalizedAdminClientId) return true;
+
+    const status = this.getStatus(normalizedAdminClientId);
+    return status.paired === true && status.adminClientId === normalizedAdminClientId;
+  }
+
   isStoreAutoPrintEnabled(adminClientId) {
     const normalizedAdminClientId = normalizeAdminClientId(adminClientId);
     if (!normalizedAdminClientId) return true;

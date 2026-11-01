@@ -135,9 +135,15 @@ function resolveAutoPrintTarget(orderData, printType) {
   };
 }
 
-function isStorePrintEnabled(pairedPrintListener, adminClientId) {
+function isStorePrintEnabled(pairedPrintListener, adminClientId, isAutoPrint) {
   if (!pairedPrintListener || !adminClientId || typeof pairedPrintListener.isStoreAutoPrintEnabled !== 'function') {
     return true;
+  }
+
+  // O botão manual depende do pareamento da loja, não da opção de autoimpressão.
+  if (isAutoPrint !== true) {
+    return typeof pairedPrintListener.isStoreManualPrintEnabled !== 'function'
+      || pairedPrintListener.isStoreManualPrintEnabled(adminClientId);
   }
 
   return pairedPrintListener.isStoreAutoPrintEnabled(adminClientId);
@@ -356,7 +362,7 @@ class SecureWebSocketServer {
         selectedPrinter = resolveConfiguredPrinterId(printer, orderData, printType);
       }
 
-      if (!isStorePrintEnabled(this.pairedPrintListener, adminClientId)) {
+      if (!isStorePrintEnabled(this.pairedPrintListener, adminClientId, isAutoPrint)) {
         logger.info(`[handlePrint] Impressão desativada para loja ${adminClientId}. Pedido ignorado.`);
         ws.send(JSON.stringify({
           success: false,

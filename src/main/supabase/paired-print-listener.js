@@ -20,6 +20,9 @@ const {
 
 const HEARTBEAT_INTERVAL_MS = 15000;
 const WATCHDOG_INTERVAL_MS = 20000;
+// Com o Realtime saudavel ('active') as consultas do watchdog sao so rede de
+// seguranca: rodam a cada 60s em vez de 20s para reduzir requisicoes/logs.
+const HEALTHY_WATCHDOG_FULL_RUN_MS = 60000;
 const RECOVERY_SKEW_MS = 10000;
 const RECOVERY_LOOKBACK_MS = 30 * 60 * 1000;
 const AUTO_PRINT_RECOVERY_MAX_AGE_MS = 5 * 60 * 1000;
@@ -474,6 +477,7 @@ class PairedPrintListener {
     this.printSettings = Object.assign({}, DEFAULT_PRINT_SETTINGS);
     this.lastSettingsRefreshAt = 0;
     this.lastRecoveryRunAt = 0;
+    this.lastWatchdogFullRunAt = 0;
     this.lastPrinterRefreshAt = 0;
   }
 
@@ -743,14 +747,23 @@ class PairedPrintListener {
     try {
       await this.ensureSessionFresh();
 
-      if ((Date.now() - this.lastSettingsRefreshAt) > 60000) {
-        await this.refreshPrintSettings();
-      }
+      const fullRunDue =
+        source !== 'interval' ||
+        this.status !== 'active' ||
+        (Date.now() - this.lastWatchdogFullRunAt) > (HEALTHY_WATCHDOG_FULL_RUN_MS - 1000);
 
-      await this.processPendingJobs();
+      if (fullRunDue) {
+        this.lastWatchdogFullRunAt = Date.now();
 
-      if ((Date.now() - this.lastRecoveryRunAt) > (WATCHDOG_INTERVAL_MS - 1000)) {
-        await this.recoverMissedOrders({ forceLookbackMs: RECOVERY_LOOKBACK_MS });
+        if ((Date.now() - this.lastSettingsRefreshAt) > 60000) {
+          await this.refreshPrintSettings();
+        }
+
+        await this.processPendingJobs();
+
+        if ((Date.now() - this.lastRecoveryRunAt) > (WATCHDOG_INTERVAL_MS - 1000)) {
+          await this.recoverMissedOrders({ forceLookbackMs: RECOVERY_LOOKBACK_MS });
+        }
       }
 
       // Rede de seguranca da regra "imprimir somente ao aceitar": roda sempre

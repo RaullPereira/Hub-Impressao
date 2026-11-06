@@ -1643,7 +1643,7 @@ class PairedPrintListener {
     const printedAt = new Date().toISOString();
     const adminClientId = this.currentPairing.adminClientId;
 
-    // Jobs "imprimir ao entrar na coluna" do KDS ficam fora do ledger da via:
+    // Jobs do KDS ("ao entrar na coluna" e "ao ficar pronto") ficam fora do ledger da via:
     // podem existir varios impressos para o mesmo pedido/via e nunca sao
     // reaproveitados aqui (senao um job pendente da coluna sumiria sem papel).
     const { data: candidates, error: existingError } = await this.supabase
@@ -1656,7 +1656,7 @@ class PairedPrintListener {
       .order('created_at', { ascending: true })
       .limit(50);
     if (existingError) throw existingError;
-    const ledgerRows = (candidates || []).filter((row) => !isKdsStationPrintJob(row));
+    const ledgerRows = (candidates || []).filter((row) => !isExplicitKdsPrintJob(row));
     const existing = ledgerRows.find((row) => row.status === 'printed');
     if (existing) return existing;
 
@@ -1713,6 +1713,38 @@ class PairedPrintListener {
     if (error) {
       throw error;
     }
+  }
+
+  // Job pendente de um pedido/via que já saiu: promover para 'printed' bate no
+  // índice único do ledger (23505) e deixa o job preso em 'pending', voltando a
+  // cada ciclo da recuperação. Se a via já tem registro impresso, o job sai da
+  // fila como 'failed' (mesma convenção de mark_order_printed); senão é promovido.
+  async settleRedundantPrintJob(job) {
+    if (!this.supabase || !job?.id || !this.currentPairing?.adminClientId) return null;
+
+    const route = job.printer_type === 'kitchen' || job.printer_type === 'bar' ? job.printer_type : 'counter';
+    const { data, error } = await this.supabase
+      .from('print_jobs')
+      .select('id, content')
+      .eq('admin_client_id', this.currentPairing.adminClientId)
+      .eq('order_id', job.order_id)
+      .eq('printer_type', route)
+      .eq('status', 'printed')
+      .neq('id', job.id)
+      .limit(20);
+    if (error) throw error;
+
+    if ((data || []).some((row) => !isExplicitKdsPrintJob(row))) {
+      const { error: updateError } = await this.supabase
+        .from('print_jobs')
+        .update({ status: 'failed' })
+        .eq('id', job.id)
+        .eq('status', 'pending');
+      if (updateError) throw updateError;
+      return null;
+    }
+
+    return this.claimPrintJob(job.id);
   }
 
   // CAS atômico: vence o UPDATE apenas o Hub que encontra o job ainda em 'pending'.
@@ -2737,7 +2769,7 @@ class PairedPrintListener {
 
       if (this.processedOrderIds.has(orderProcessingKey)) {
         // Pedido já foi impresso por outro fluxo desta instância — só promove o job (best-effort).
-        await this.claimPrintJob(jobId).catch(() => null);
+        await this.settleRedundantPrintJob(job).catch(() => null);
         this.processedJobIds.add(jobId);
         this.trimRuntimeCache(this.processedJobIds);
         return;
@@ -2749,7 +2781,7 @@ class PairedPrintListener {
       }
 
       if (!isExplicitKdsJob && await this.isOrderAlreadyPrinted(orderId)) {
-        await this.claimPrintJob(jobId).catch(() => null);
+        await this.settleRedundantPrintJob(job).catch(() => null);
         this.processedJobIds.add(jobId);
         this.trimRuntimeCache(this.processedJobIds);
         return;

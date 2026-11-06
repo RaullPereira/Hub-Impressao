@@ -160,7 +160,17 @@ function getParsedPaymentSplits(order) {
   });
 }
 
-function generateLogoESCPOS(logoJson) {
+// Letra grande so quando cabe na linha: ESC/POS dobra a largura (2x) e o que
+// passa das colunas quebra a linha (58mm tem 32 colunas, 80mm tem 48).
+function bigSizeFor(text, cols) {
+  return String(text || '').length * 2 <= cols ? CMD.TXT_BIG : CMD.TXT_DOUBLE_H;
+}
+
+// Logo em imagem raster (GS v 0). A largura da imagem tem de fechar em bytes
+// inteiros (8 pontos) e a imagem e centralizada aqui, com margem em branco
+// dos dois lados: varias impressoras 58mm ignoram ESC a para imagem e a
+// deixam colada na esquerda (ou listrada, quando a largura nao e multipla de 8).
+function generateLogoESCPOS(logoJson, cols = 48) {
   if (!logoJson) return [];
 
   try {
@@ -171,20 +181,25 @@ function generateLogoESCPOS(logoJson) {
     if (!width || !height || !data) return [];
 
     const bitmap = Buffer.from(data, 'base64');
-    const bytesPerRow = width / 8;
-    const xL = bytesPerRow & 0xFF;
-    const xH = (bytesPerRow >> 8) & 0xFF;
-    const yL = height & 0xFF;
-    const yH = (height >> 8) & 0xFF;
+    const sourceStride = Math.ceil(width / 8);
+    if (bitmap.length < sourceStride * height) return [];
 
-    let command = '\x1D\x76\x30\x00';
-    command += String.fromCharCode(xL, xH, yL, yH);
-
-    for (let i = 0; i < bitmap.length; i++) {
-      command += String.fromCharCode(bitmap[i]);
+    // Fonte A tem 12 pontos por coluna: 32 colunas = 384 pontos (58mm).
+    const paperBytes = Math.max(1, Math.floor((cols * 12) / 8));
+    const keepBytes = Math.min(sourceStride, paperBytes);
+    const leftPad = Math.floor((paperBytes - keepBytes) / 2);
+    const rows = Buffer.alloc(paperBytes * height);
+    for (let y = 0; y < height; y++) {
+      bitmap.copy(rows, y * paperBytes + leftPad, y * sourceStride, y * sourceStride + keepBytes);
     }
 
-    return [CMD.ALIGN_CENTER, command, '\n'];
+    const xL = paperBytes & 0xFF;
+    const xH = (paperBytes >> 8) & 0xFF;
+    const yL = height & 0xFF;
+    const yH = (height >> 8) & 0xFF;
+    const command = '\x1D\x76\x30\x00' + String.fromCharCode(xL, xH, yL, yH) + rows.toString('latin1');
+
+    return [CMD.ALIGN_LEFT, command, '\n', CMD.ALIGN_CENTER];
   } catch {
     return [];
   }
@@ -215,16 +230,13 @@ function generateKitchenPrintData(order, printSettings) {
   else if (orderType === 'mesa') typeLabel = `MESA ${order.table_number || order.tableNumber || ''}`.trim();
   else if (scheduledAt) typeLabel = 'RETIRADA AGENDADA';
 
+  const headline = isIfood ? `iFood #${displayId}` : `#${displayId} ${typeLabel}`;
   data.push(CMD.ALIGN_CENTER);
-  data.push(CMD.TXT_BIG);
-  if (isIfood) {
-    data.push(` iFood #${displayId} \n`);
-  } else {
-    data.push(` #${displayId} ${typeLabel} \n`);
-  }
+  data.push(bigSizeFor(headline, cols));
   data.push(CMD.medium_ON);
-  data.push(CMD.TXT_NORMAL);
+  data.push(`${headline}\n`);
   data.push(CMD.medium_OFF);
+  data.push(CMD.TXT_NORMAL);
   data.push(separatorFine);
 
   data.push(CMD.ALIGN_LEFT);
@@ -518,9 +530,9 @@ function generateIfoodPrintData(order, printSettings) {
   data.push('\n');
   data.push(CMD.FONT_A);
   data.push(CMD.ALIGN_CENTER);
-  data.push(CMD.TXT_BIG);
+  data.push(bigSizeFor(`iFood #${displayId}`, cols));
   data.push(CMD.medium_ON);
-  data.push(`  iFood #${displayId}  \n`);
+  data.push(`iFood #${displayId}\n`);
   data.push(CMD.medium_OFF);
   data.push(CMD.TXT_NORMAL);
   data.push(`iFood - ${typeLabel}\n`);
@@ -811,7 +823,7 @@ function generateCounterPrintData(order, printSettings) {
   data.push(CMD.ALIGN_CENTER);
 
   if (settings.logoBase64) {
-    generateLogoESCPOS(settings.logoBase64).forEach((command) => data.push(command));
+    generateLogoESCPOS(settings.logoBase64, cols).forEach((command) => data.push(command));
   }
 
   if (settings.showStoreName && settings.storeName) {
@@ -839,8 +851,10 @@ function generateCounterPrintData(order, printSettings) {
   else if (scheduledAt) typeLabel = 'RETIRADA AGENDADA';
 
   if (!isService) {
-    data.push(is58mm ? CMD.TXT_DOUBLE_H : CMD.TXT_BIG);
+    data.push(is58mm ? CMD.TXT_DOUBLE_H : bigSizeFor(`#${orderNum} ${typeLabel}`, cols));
+    data.push(CMD.medium_ON);
     data.push(`#${orderNum} ${typeLabel}\n`);
+    data.push(CMD.medium_OFF);
     data.push(CMD.TXT_NORMAL);
   }
 
@@ -1251,14 +1265,16 @@ function generateCounterPrintData(order, printSettings) {
 
     if (beverageItems.length > 0) {
       if (!isCompactCounterLayout) data.push(separatorFine);
+      // Sem fundo invertido: nas termicas 58mm o preto corrido sai fraco e a
+      // letra dupla passava das colunas. Faixa de '=' e letra grande em negrito.
       data.push(CMD.ALIGN_CENTER);
-      data.push(CMD.INVERSE_ON);
-      data.push(CMD.TXT_BIG);
+      data.push('='.repeat(cols) + '\n');
+      data.push(bigSizeFor('ATENCAO MOTOBOY', cols));
       data.push(CMD.medium_ON);
-      data.push(' ATENCAO MOTOBOY \n');
+      data.push('ATENCAO MOTOBOY\n');
       data.push(CMD.medium_OFF);
       data.push(CMD.TXT_NORMAL);
-      data.push(CMD.INVERSE_OFF);
+      data.push('='.repeat(cols) + '\n');
       emptyLine();
       data.push(CMD.ALIGN_LEFT);
       data.push(CMD.TXT_BIG);

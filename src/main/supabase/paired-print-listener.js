@@ -1,8 +1,10 @@
+const os = require('os');
 const Settings = require('../config/settings');
 const logger = require('../utils/logger');
 const { performance } = require('node:perf_hooks');
 const BaseWebSocketTransport = require('ws');
-const { DEFAULT_PRINT_SETTINGS } = require('../printer/pedidoshub-formatter');
+const pedidosHubFormatter = require('../printer/pedidoshub-formatter');
+const { DEFAULT_PRINT_SETTINGS } = pedidosHubFormatter;
 const PrinterDispatchQueue = require('../printer/printer-dispatch-queue');
 const fetchCompat = require('../utils/fetch');
 const {
@@ -15,10 +17,18 @@ const {
   buildAutoPrintRoutesForOrder,
   getAutoPrintPrinterForRoute,
   normalizeAutoPrintMap,
-  normalizeAutoPrintRoute
+  normalizeAutoPrintRoute,
+  isAppTableOrder
 } = require('../print-routes');
 
 const HEARTBEAT_INTERVAL_MS = 15000;
+const HEARTBEAT_PERSIST_INTERVAL_MS = 60000;
+// Reserva perdida para outro aparelho: o navegador do caixa pode levar ate
+// ~60s para tentar imprimir pelo servico local, falhar e soltar a reserva.
+// O Hub confere de novo em 30s, segue tentando na recuperacao e so considera
+// impresso depois de 90s com a reserva ocupada.
+const LOST_CLAIM_RECHECK_MS = 30000;
+const LOST_CLAIM_GIVE_UP_MS = 90000;
 const WATCHDOG_INTERVAL_MS = 20000;
 // Com o Realtime saudavel ('active') as consultas do watchdog sao so rede de
 // seguranca: rodam a cada 60s em vez de 20s para reduzir requisicoes/logs.
@@ -36,6 +46,10 @@ const PAYMENT_METHODS_CACHE_TTL_MS = 60000;
 const SESSION_REFRESH_THRESHOLD_MS = 3 * 60 * 1000;
 const PRINT_RETRY_ATTEMPTS = 3;
 const PRINTER_REFRESH_TTL_MS = 30000;
+// Comandas do app do garçom (hub_gestao_print_requests): mesma janela da aba da Pedidos Hub.
+const GESTAO_PRINT_RECOVERY_MS = 15 * 60 * 1000;
+const GESTAO_BUSINESS_CACHE_MS = 5 * 60 * 1000;
+const GESTAO_MAX_ATTEMPTS = 3;
 
 let createClientLoader = null;
 
@@ -349,6 +363,15 @@ function safeDisposeRealtimeClient(realtime) {
 }
 
 function mapPrintSettingsFromDB(data) {
+  const mapped = mapPrintSettingsRow(data);
+  // Linha crua do banco, para o formatador oficial do web ler tambem as
+  // configuracoes por via (cozinha, bar) na comanda de reserva. Fora da
+  // enumeracao para nao entrar em comparacoes nem em logs.
+  Object.defineProperty(mapped, '__dbRow', { value: data || null, enumerable: false });
+  return mapped;
+}
+
+function mapPrintSettingsRow(data) {
   return {
     paperWidth: data?.paper_width || DEFAULT_PRINT_SETTINGS.paperWidth,
     marginLeft: data?.margin_left || 0,
@@ -390,8 +413,23 @@ function mapPrintSettingsFromDB(data) {
     kdsReadyPrintRoutes: Array.isArray(data?.kds_ready_print_routes)
       ? data.kds_ready_print_routes.filter((route) => route === 'counter' || route === 'kitchen')
       : [],
-    barPrintEnabled: data?.bar_print_enabled === true
+    barPrintEnabled: data?.bar_print_enabled === true,
+    // Computador da impressao automatica escolhido no painel (null = nenhum).
+    autoPrintStation: normalizeAutoPrintStation(data?.auto_print_station)
   };
+}
+
+function normalizeAutoPrintStation(raw) {
+  let value = raw;
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return null; }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const pick = (entry) => (typeof entry === 'string' && entry.trim() ? entry.trim() : null);
+  const browserId = pick(value.browserId ?? value.browser_id);
+  const hubStationId = pick(value.hubStationId ?? value.hub_station_id);
+  if (!browserId && !hubStationId) return null;
+  return { browserId, hubStationId, label: pick(value.label) || 'Computador da loja' };
 }
 
 function resolvePaymentMethodName(paymentMethodId, methods) {
@@ -457,6 +495,11 @@ class PairedPrintListener {
     this.connectionAttemptId = 0;
     this.orderChannel = null;
     this.printJobsChannel = null;
+    this.gestaoPrintChannel = null;
+    this.gestaoBusinessIds = null;
+    this.gestaoBusinessIdsAt = 0;
+    this.gestaoInFlight = new Set();
+    this.gestaoAttempts = new Map();
     this.printSettingsChannel = null;
     this.authSubscription = null;
     this.processedOrderIds = new Set();
@@ -479,6 +522,9 @@ class PairedPrintListener {
     this.lastRecoveryRunAt = 0;
     this.lastWatchdogFullRunAt = 0;
     this.lastPrinterRefreshAt = 0;
+    this.lastHeartbeatPersistAt = 0;
+    this.recoveryFloorAt = null;
+    this.lostClaimSince = new Map();
   }
 
   setPrinterManager(printerManager) {
@@ -629,15 +675,31 @@ class PairedPrintListener {
     return (Date.now() - rememberedAt) > AUTO_PRINT_RECOVERY_MAX_AGE_MS;
   }
 
+  // Sem computador escolhido, este Hub imprime (comportamento antigo). Com
+  // computador escolhido, so imprime se for este Hub.
+  isAutoPrintStation() {
+    const station = this.printSettings?.autoPrintStation;
+    // Escolha sem id de Hub (feita so pelo navegador): o Hub nao sabe se e o
+    // dele, entao continua imprimindo. Quem fica de fora sao os navegadores
+    // nao escolhidos. Recusar aqui deixou a Casa da Pizza sem comanda (09/11).
+    if (!station || !station.hubStationId) return true;
+    return station.hubStationId === Settings.getStationId();
+  }
+
   getStatus() {
     const pairing = this.currentPairing || this.pairingStore.getPairing();
     const active = this.status === 'active';
     const paired = this.hasValidPairing(pairing);
+    const isAutoPrintStation = this.isAutoPrintStation();
 
     return {
       paired,
       active,
-      controlsAutoPrint: paired && active,
+      controlsAutoPrint: paired && active && isAutoPrintStation,
+      isAutoPrintStation,
+      stationId: Settings.getStationId(),
+      stationLabel: os.hostname(),
+      autoPrintStationLabel: this.printSettings?.autoPrintStation?.label || null,
       status: this.status,
       adminClientId: pairing?.adminClientId || null,
       appBaseUrl: pairing?.appBaseUrl || null,
@@ -659,6 +721,20 @@ class PairedPrintListener {
   touchHeartbeat() {
     if (!this.currentPairing?.adminClientId) return;
     const now = new Date().toISOString();
+    const nowMs = Date.now();
+    // O heartbeat roda a cada 15s e em todo evento do Realtime. Gravar o
+    // settings.json inteiro em cada um travava o processo principal em disco
+    // lento. Em memoria fica sempre atual; no disco, no maximo 1x por minuto
+    // (a recuperacao apos reinicio so fica ate 1 min maior, e o ledger evita
+    // duplicar).
+    if (
+      this.lastHeartbeatPersistAt &&
+      (nowMs - this.lastHeartbeatPersistAt) < HEARTBEAT_PERSIST_INTERVAL_MS
+    ) {
+      this.currentPairing = Object.assign({}, this.currentPairing, { lastSeenAt: now });
+      return;
+    }
+    this.lastHeartbeatPersistAt = nowMs;
     this.pairingStore.updatePairing({ lastSeenAt: now });
     this.currentPairing = this.pairingStore.getPairing();
   }
@@ -770,6 +846,10 @@ class PairedPrintListener {
       // (e barata — so consulta quando ha pedidos adiados pendentes) e nao depende
       // da janela de created_at do recoverMissedOrders.
       await this.recoverDeferredAcceptOrders();
+
+      await this.sweepGestaoPrintRequests().catch((error) => {
+        logger.warn(`${this.getLogContext()} Comandas do app: varredura falhou (${error?.message || error}).`);
+      });
     } catch (error) {
       logger.warn(
         `${this.getLogContext()} Watchdog (${source}) detectou falha:`,
@@ -987,10 +1067,12 @@ class PairedPrintListener {
       this.reconnectTimer = null;
     }
 
-    const channels = [this.orderChannel, this.printJobsChannel, this.printSettingsChannel].filter(Boolean);
+    const channels = [this.orderChannel, this.printJobsChannel, this.printSettingsChannel, this.gestaoPrintChannel].filter(Boolean);
     this.orderChannel = null;
     this.printJobsChannel = null;
     this.printSettingsChannel = null;
+    this.gestaoPrintChannel = null;
+    this.gestaoBusinessIds = null;
 
     const supabase = this.supabase;
     const realtime = supabase?.realtime || null;
@@ -1057,6 +1139,13 @@ class PairedPrintListener {
     this.status = 'connecting';
     this.lastError = null;
     this.currentPairing = pairing;
+    // Piso da recuperacao, gravado ANTES do heartbeat renovar o lastSeenAt:
+    // reconexao/reinicio recupera desde a ultima vez visto (teto de 5 min);
+    // primeiro pareamento nao imprime pedidos anteriores.
+    const lastSeenMs = Date.parse(pairing?.lastSeenAt || '');
+    this.recoveryFloorAt = recoverMissedOrders && Number.isFinite(lastSeenMs)
+      ? lastSeenMs - RECOVERY_SKEW_MS
+      : Date.now();
 
     try {
       const createClient = await getCreateClient();
@@ -1263,6 +1352,11 @@ class PairedPrintListener {
       this.awaitChannelSubscription(this.printJobsChannel, 'print_jobs', connectionAttemptId),
       this.awaitChannelSubscription(this.printSettingsChannel, 'print_settings', connectionAttemptId)
     ]);
+
+    // Opcional: lojas sem o app do garçom seguem normais se isto falhar.
+    void this.subscribeGestaoPrintRequests(adminClientId, connectionAttemptId).catch((error) => {
+      logger.warn(`${this.getLogContext()} Comandas do app: assinatura falhou (${error?.message || error}). A varredura continua cobrindo.`);
+    });
   }
 
   awaitChannelSubscription(channel, label, connectionAttemptId) {
@@ -1366,7 +1460,7 @@ class PairedPrintListener {
     this.lastSettingsRefreshAt = Date.now();
 
     logger.info(
-      `${this.getLogContext()} Configurações sincronizadas: autoPrint=${this.printSettings.autoPrintEnabled} type=${this.printSettings.autoPrintType} routes=${(this.printSettings.autoPrintRoutes || []).join(',')} bar=${this.printSettings.barPrintEnabled === true}`
+      `${this.getLogContext()} Configurações sincronizadas: autoPrint=${this.printSettings.autoPrintEnabled} type=${this.printSettings.autoPrintType} routes=${(this.printSettings.autoPrintRoutes || []).join(',')} bar=${this.printSettings.barPrintEnabled === true} computador=${this.printSettings.autoPrintStation ? (this.isAutoPrintStation() ? 'este' : this.printSettings.autoPrintStation.label) : 'qualquer'}`
     );
 
     return this.printSettings;
@@ -1381,22 +1475,18 @@ class PairedPrintListener {
       return;
     }
 
-    const lastSeenAt = parseIsoDate(this.currentPairing.lastSeenAt);
-    let sinceDate = lastSeenAt
-      ? new Date(lastSeenAt.getTime() - RECOVERY_SKEW_MS)
-      : new Date(Date.now() - (forceLookbackMs || RECOVERY_LOOKBACK_MS));
-
-    if (forceLookbackMs) {
-      const minimumSince = new Date(Date.now() - forceLookbackMs);
-      if (sinceDate.getTime() < minimumSince.getTime()) {
-        sinceDate = minimumSince;
-      }
-    }
-
-    const automaticRecoverySince = new Date(Date.now() - AUTO_PRINT_RECOVERY_MAX_AGE_MS);
-    if (sinceDate.getTime() < automaticRecoverySince.getTime()) {
-      sinceDate = automaticRecoverySince;
-    }
+    // Janela: ultimos 5 min, sem voltar antes do piso desta conexao. Antes a
+    // janela partia do lastSeenAt, que o heartbeat renova a cada 15s; a
+    // recuperacao periodica so enxergava ~15-25s e um INSERT perdido no Realtime
+    // (ou uma reserva perdida para outro aparelho) nunca era recuperado.
+    // `forceLookbackMs` fica aceito por compatibilidade; o teto continua 5 min.
+    void forceLookbackMs;
+    const automaticRecoverySince = Date.now() - AUTO_PRINT_RECOVERY_MAX_AGE_MS;
+    const savedLastSeenMs = Date.parse(this.currentPairing.lastSeenAt || '');
+    const floor = Number.isFinite(this.recoveryFloorAt)
+      ? this.recoveryFloorAt
+      : (Number.isFinite(savedLastSeenMs) ? savedLastSeenMs - RECOVERY_SKEW_MS : Date.now());
+    const sinceDate = new Date(Math.max(floor, automaticRecoverySince));
 
     const sinceIso = sinceDate.toISOString();
     logger.info(`${this.getLogContext()} Recuperando pedidos desde ${sinceIso}`);
@@ -1627,6 +1717,28 @@ class PairedPrintListener {
     }
 
     return Array.isArray(data) && data.length > 0;
+  }
+
+  // Job pendente da propria via (fila do pedido). Pedido manual do celular e
+  // coluna do KDS (`kds_station`/`kds_ready`) sao pedidos explicitos e nao
+  // substituem a comanda automatica da chegada.
+  async hasPendingRoutePrintJob(orderId) {
+    if (!this.supabase || !this.currentPairing?.adminClientId) return false;
+
+    const { data, error } = await this.supabase
+      .from('print_jobs')
+      .select('id, content')
+      .eq('admin_client_id', this.currentPairing.adminClientId)
+      .eq('order_id', orderId)
+      .eq('status', 'pending')
+      .limit(20);
+
+    if (error) {
+      logger.warn('[Pairing] Falha ao verificar jobs pendentes:', error.message || error);
+      return false;
+    }
+
+    return Array.isArray(data) && data.some((job) => !isExplicitKdsPrintJob(job));
   }
 
   async isOrderAlreadyPrinted(orderId) {
@@ -1929,7 +2041,7 @@ class PairedPrintListener {
     return configuredPrinterId;
   }
 
-  async resolvePrintPayload(orderId, printType, job = null) {
+  async resolvePrintPayload(orderId, printType, job = null, orderData = null) {
     const inlinePayload = job ? this.getJobPayload(job, printType) : null;
     if (inlinePayload) {
       return inlinePayload;
@@ -1941,7 +2053,52 @@ class PairedPrintListener {
     }
 
     logger.info(`${this.getLogContext()} Buscando payload oficial no Pedidos Hub para pedido ${orderId}`);
-    return this.fetchRenderedPayload(orderId, printType);
+    try {
+      return await this.fetchRenderedPayload(orderId, printType);
+    } catch (error) {
+      const fallback = this.buildLocalFallbackPayload(error, orderData, printType, orderId);
+      if (fallback) return fallback;
+      throw error;
+    }
+  }
+
+  // Render oficial fora do ar (rede, timeout, 5xx): monta a comanda com o
+  // layout local do Hub para o papel nao deixar de sair. Em 09/11 um deploy
+  // quebrado no /api/print/render deixou todas as lojas sem comanda. Erro 4xx
+  // (pedido inexistente, sem permissao) continua falhando: ali o problema nao
+  // e disponibilidade e imprimir poderia sair errado.
+  buildLocalFallbackPayload(error, orderData, printType, orderId = null) {
+    const status = Number(error?.status);
+    if (Number.isFinite(status) && status >= 400 && status < 500) return null;
+    if (!orderData || typeof orderData !== 'object') return null;
+
+    let items = orderData.items;
+    if (typeof items === 'string') {
+      try { items = JSON.parse(items); } catch (_) { items = null; }
+    }
+    if (!Array.isArray(items) || items.length === 0) return null;
+
+    try {
+      const commands = pedidosHubFormatter.generateOrderPrintData(
+        { ...orderData, items },
+        printType,
+        this.printSettings
+      );
+      const commandString = Array.isArray(commands) ? commands.join('') : String(commands || '');
+      if (!commandString) return null;
+      logger.warn(
+        `${this.getLogContext()} Render oficial indisponivel para pedido #${orderData.order_number || orderId || orderData.id} (${error?.message || error}). Usando layout local do Hub.`
+      );
+      return {
+        rawContent: Buffer.from(commandString, 'binary').toString('base64'),
+        encoding: 'base64',
+        printType,
+        localFallback: true
+      };
+    } catch (formatError) {
+      logger.warn(`${this.getLogContext()} Layout local do Hub falhou:`, formatError?.message || formatError);
+      return null;
+    }
   }
 
   async fetchRenderedPayload(orderId, printType) {
@@ -2020,7 +2177,9 @@ class PairedPrintListener {
     }
     if (!response.ok) {
       const detail = raw?.error || raw?.message || `HTTP ${response.status}`;
-      throw new Error(`Falha ao renderizar impressão no PedidosHub: ${detail}`);
+      const renderError = new Error(`Falha ao renderizar impressão no PedidosHub: ${detail}`);
+      renderError.status = response.status;
+      throw renderError;
     }
 
     return raw?.payload || raw?.data || raw;
@@ -2040,12 +2199,28 @@ class PairedPrintListener {
     };
   }
 
-  async fetchRenderedPayloads(orderId, printTypes) {
+  async fetchRenderedPayloads(orderId, printTypes, orderData = null) {
     const uniqueTypes = Array.isArray(printTypes) ? [...new Set(printTypes)] : [];
     if (uniqueTypes.length === 0) {
       throw new Error('Nenhum tipo de impressão solicitado para renderização');
     }
 
+    try {
+      return await this.fetchOfficialRenderedPayloads(orderId, uniqueTypes);
+    } catch (error) {
+      if (!orderData) throw error;
+      const fallbackEntries = uniqueTypes.map((printType) => [
+        printType,
+        this.buildLocalFallbackPayload(error, orderData, printType, orderId)
+      ]);
+      if (fallbackEntries.every(([, candidate]) => candidate)) {
+        return Object.fromEntries(fallbackEntries);
+      }
+      throw error;
+    }
+  }
+
+  async fetchOfficialRenderedPayloads(orderId, uniqueTypes) {
     const payload = await this.requestOfficialRender({
       adminClientId: this.currentPairing?.adminClientId || null,
       orderId,
@@ -2094,6 +2269,173 @@ class PairedPrintListener {
         ? candidate.encoding.trim()
         : 'base64'
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Comandas do app do garçom (hub_gestao_print_requests).
+  // O app grava a comanda (itens novos da mesa, fechamento, "Imprimir") e espera
+  // o status 'printed'/'failed' para avisar o garçom. Antes só a aba da Pedidos Hub
+  // aberta imprimia; agora o Hub também. A troca 'pending' -> 'printing' é atômica:
+  // com aba e Hub ligados, só um imprime.
+  // ---------------------------------------------------------------------------
+
+  async loadGestaoBusinessIds(force = false) {
+    const adminClientId = this.currentPairing?.adminClientId;
+    if (!this.supabase || !adminClientId) return [];
+    if (!force && this.gestaoBusinessIds && (Date.now() - this.gestaoBusinessIdsAt) < GESTAO_BUSINESS_CACHE_MS) {
+      return this.gestaoBusinessIds;
+    }
+    const { data, error } = await this.supabase
+      .from('hub_gestao_businesses')
+      .select('id')
+      .eq('linked_admin_client_id', adminClientId);
+    if (error) throw error;
+    this.gestaoBusinessIds = (data || []).map((row) => String(row.id));
+    this.gestaoBusinessIdsAt = Date.now();
+    return this.gestaoBusinessIds;
+  }
+
+  async subscribeGestaoPrintRequests(adminClientId, connectionAttemptId) {
+    const businessIds = await this.loadGestaoBusinessIds(true);
+    if (businessIds.length === 0 || connectionAttemptId !== this.connectionAttemptId || this.isStopping) return;
+    this.gestaoPrintChannel = this.supabase
+      .channel(`hub-impressao-gestao-print-${adminClientId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'hub_gestao_print_requests',
+          filter: businessIds.length === 1 ? `business_id=eq.${businessIds[0]}` : `business_id=in.(${businessIds.join(',')})`
+        },
+        (payload) => {
+          if (this.isStopping || connectionAttemptId !== this.connectionAttemptId) return;
+          void this.processGestaoPrintRequest(payload.new, 'realtime_insert');
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') void this.sweepGestaoPrintRequests().catch(() => null);
+      });
+  }
+
+  async sweepGestaoPrintRequests() {
+    if (!this.supabase || !this.currentPairing?.adminClientId || this.gestaoSweeping) return;
+    this.gestaoSweeping = true;
+    try {
+      const businessIds = await this.loadGestaoBusinessIds();
+      if (businessIds.length === 0) return;
+      const since = new Date(Date.now() - GESTAO_PRINT_RECOVERY_MS).toISOString();
+      const { data, error } = await this.supabase
+        .from('hub_gestao_print_requests')
+        .select('*')
+        .in('business_id', businessIds)
+        .eq('status', 'pending')
+        .gte('created_at', since)
+        .order('created_at', { ascending: true })
+        .limit(50);
+      if (error) throw error;
+      for (const request of data || []) {
+        if (this.isStopping) break;
+        await this.processGestaoPrintRequest(request, 'sweep');
+      }
+    } finally {
+      this.gestaoSweeping = false;
+    }
+  }
+
+  // Impressora de cada via da comanda do app. Bar só com impressora de bar
+  // configurada de verdade (sem cair na padrão), senão a bebida sai na cozinha.
+  async resolveGestaoRoutePrinter(route) {
+    const adminClientId = this.currentPairing?.adminClientId || null;
+    if (route === 'bar') {
+      const explicitBar = await this.resolveAutoPrintPrinterId('bar');
+      if (explicitBar) return explicitBar;
+      const storeBar = adminClientId ? Settings.getStorePrinters(adminClientId)?.bar : null;
+      if (!storeBar) return null;
+      return this.printerManager?.resolveAvailablePrinterName
+        ? await this.printerManager.resolveAvailablePrinterName(storeBar, { allowDefault: false })
+        : storeBar;
+    }
+    if (route === 'kitchen') {
+      return (await this.resolveAutoPrintPrinterId('kitchen')) || (await this.resolveAvailablePrinterId('kitchen'));
+    }
+    return (await this.resolveAutoPrintPrinterId('attendance')) || (await this.resolveAvailablePrinterId('counter'));
+  }
+
+  async setGestaoPrintStatus(id, status, error = null) {
+    const payload = { status, error: error ? String(error).slice(0, 500) : null };
+    if (status === 'printed') payload.printed_at = new Date().toISOString();
+    const { error: updateError } = await this.supabase
+      .from('hub_gestao_print_requests')
+      .update(payload)
+      .eq('id', id);
+    if (updateError) throw updateError;
+  }
+
+  async processGestaoPrintRequest(request, source = 'manual') {
+    if (!request?.id || request.status !== 'pending') return;
+    if (!this.supabase || !this.currentPairing?.adminClientId) return;
+    const id = String(request.id);
+    if (this.gestaoInFlight.has(id)) return;
+    if (!this.isAutoPrintStation()) return;
+    const attempts = this.gestaoAttempts.get(id) || 0;
+    if (attempts >= GESTAO_MAX_ATTEMPTS) return;
+
+    this.gestaoInFlight.add(id);
+    try {
+      const { data: claimed, error: claimError } = await this.supabase
+        .from('hub_gestao_print_requests')
+        .update({ status: 'printing' })
+        .eq('id', id)
+        .eq('status', 'pending')
+        .select('id')
+        .maybeSingle();
+      if (claimError) throw claimError;
+      if (!claimed) return; // outra ponta (aba ou outro Hub) pegou
+
+      this.gestaoAttempts.set(id, attempts + 1);
+      if (this.gestaoAttempts.size > MAX_RUNTIME_CACHE) {
+        this.gestaoAttempts.delete(this.gestaoAttempts.keys().next().value);
+      }
+
+      try {
+        await this.refreshPrintersIfNeeded();
+        const barPrinter = await this.resolveGestaoRoutePrinter('bar');
+        const rendered = await this.requestOfficialRender({
+          adminClientId: this.currentPairing.adminClientId,
+          gestaoPrintRequestId: id,
+          hasBarRoute: Boolean(barPrinter)
+        });
+        const jobs = Array.isArray(rendered?.gestaoPrintJobs) ? rendered.gestaoPrintJobs : [];
+        for (const job of jobs) {
+          const printerId = job.route === 'bar' ? barPrinter : await this.resolveGestaoRoutePrinter(job.route);
+          if (!printerId) {
+            const label = job.route === 'kitchen' ? 'cozinha' : job.route === 'bar' ? 'bar' : 'caixa';
+            throw Object.assign(new Error(`Sem impressora de ${label} configurada no Hub Impressão.`), { definitive: true });
+          }
+          const payload = this.normalizeRenderedPayload(job, job.route);
+          if (!payload) throw Object.assign(new Error('Comanda veio vazia da Pedidos Hub.'), { definitive: true });
+          await this.runPrintActionWithRetry(
+            () => this.printRawPayload(printerId, payload, job.route),
+            `comanda do app ${id}`
+          );
+        }
+        await this.setGestaoPrintStatus(id, 'printed');
+        logger.info(`${this.getLogContext()} Comanda do app ${id} impressa (${jobs.map((job) => job.route).join(', ') || 'nada a imprimir'}, fonte=${source}).`);
+      } catch (error) {
+        const lastTry = (this.gestaoAttempts.get(id) || 0) >= GESTAO_MAX_ATTEMPTS;
+        const retry = !error?.definitive && !lastTry && this.isRetriablePrintError(error);
+        logger.error(`${this.getLogContext()} Comanda do app ${id} não imprimiu${retry ? ' (vai tentar de novo)' : ''}:`, error?.message || error);
+        // Recuperável volta para a fila (a próxima varredura ou a aba tenta de novo);
+        // definitivo vira 'failed' com o motivo, que o app mostra para o garçom.
+        await this.setGestaoPrintStatus(id, retry ? 'pending' : 'failed', retry ? null : (error?.message || 'Falha ao imprimir'))
+          .catch(() => null);
+      }
+    } catch (error) {
+      logger.warn(`${this.getLogContext()} Comanda do app ${id}: não consegui pegar da fila (${error?.message || error}).`);
+    } finally {
+      this.gestaoInFlight.delete(id);
+    }
   }
 
   async printRawPayload(printerId, payload, printType) {
@@ -2163,7 +2505,8 @@ class PairedPrintListener {
       } else {
         payloads = await this.fetchRenderedPayloads(
           orderId,
-          routes.map((route) => route.printType)
+          routes.map((route) => route.printType),
+          orderData
         );
       }
 
@@ -2189,6 +2532,26 @@ class PairedPrintListener {
       printerId,
       () => this.printRawPayload(printerId, payload, printType)
     );
+  }
+
+  // true = continuar tentando (reserva pode ser solta); false = desistir.
+  shouldRetryLostClaim(order, orderId) {
+    const firstLostAt = this.lostClaimSince.get(orderId);
+    if (!firstLostAt) {
+      this.lostClaimSince.set(orderId, Date.now());
+      if (this.lostClaimSince.size > MAX_RUNTIME_CACHE) this.lostClaimSince.clear();
+      const connectionAttemptId = this.connectionAttemptId;
+      const timer = setTimeout(() => {
+        if (this.isStopping || connectionAttemptId !== this.connectionAttemptId) return;
+        if (this.processedOrderIds.has(orderId)) return;
+        void this.handleAutoPrintOrder(order, 'lost_claim_recheck');
+      }, LOST_CLAIM_RECHECK_MS);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+      return true;
+    }
+    if ((Date.now() - firstLostAt) < LOST_CLAIM_GIVE_UP_MS) return true;
+    this.lostClaimSince.delete(orderId);
+    return false;
   }
 
   async handleAutoPrintOrder(order, source) {
@@ -2220,6 +2583,13 @@ class PairedPrintListener {
       this.processedOrderIds.add(orderId);
       this.trimRuntimeCache(this.processedOrderIds);
       logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId} ja foi impresso offline pelo navegador. Auto print do Hub ignorado.`);
+      return;
+    }
+    if (!this.isAutoPrintStation()) {
+      // Outro computador foi escolhido para a impressao automatica. Nao reserva
+      // (senao a comanda fica "impressa" aqui sem papel) e nao marca como
+      // processado: se este Hub for escolhido, a recuperacao imprime.
+      logger.info(`${this.getLogContext()} Pedido #${order.order_number || order.id}: impressão automática fica com ${this.printSettings.autoPrintStation?.label || 'outro computador'}. Ignorado aqui.`);
       return;
     }
     // Regra "imprimir somente ao aceitar": pedidos do cardapio digital
@@ -2272,14 +2642,25 @@ class PairedPrintListener {
         // Modo per-printer: roteia cada via aplicavel apenas para sua impressora
         // explicita, reivindica o ledger por printer_type (exactly-once por via) e
         // pula vias sem impressora configurada (sem fallback para default).
-        await this.autoPrintPerPrinter(order, orderId, autoPrintMap, source, telemetryContext);
+        const perPrinterResult = await this.autoPrintPerPrinter(order, orderId, autoPrintMap, source, telemetryContext);
+        if (
+          perPrinterResult?.printedCount === 0 &&
+          perPrinterResult?.skippedCount > 0 &&
+          this.shouldRetryLostClaim(order, orderId)
+        ) {
+          // Outro aparelho reservou a via. Se ele falhar e soltar a reserva, a
+          // nova conferencia imprime; marcar como processado perderia a comanda.
+          logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId}: via reservada por outro aparelho. Nova conferência em ${LOST_CLAIM_RECHECK_MS / 1000}s.`);
+          return;
+        }
+        this.lostClaimSince.delete(orderId);
         this.processedOrderIds.add(orderId);
         this.trimRuntimeCache(this.processedOrderIds);
         logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId} processado para auto-print por impressora.`);
         return;
       }
 
-      const hasScheduledPrintJob = await this.hasPrintJobWithStatuses(orderId, ['pending']);
+      const hasScheduledPrintJob = await this.hasPendingRoutePrintJob(orderId);
       if (hasScheduledPrintJob) {
         logger.info(
           `${this.getLogContext()} Pedido #${order.order_number || orderId} já possui print job pendente. Ignorando auto print.`
@@ -2289,7 +2670,9 @@ class PairedPrintListener {
 
       // Modo legado (sem sub-mapa autoPrint): usa a seleção por checkbox
       // persistida em auto_print_routes, com fallback para auto_print_type antigo.
-      const legacyRoutes = buildLegacyAutoPrintRoutes(this.printSettings);
+      // Mesa do garçom (app): sem a via do caixa no automático, como no modo por impressora.
+      const legacyRoutes = buildLegacyAutoPrintRoutes(this.printSettings)
+        .filter((route) => !(route.route === 'counter' && isAppTableOrder(order)));
       if (legacyRoutes.length === 0) {
         logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId}: nenhuma via automática selecionada.`);
         this.processedOrderIds.add(orderId);
@@ -2373,14 +2756,23 @@ class PairedPrintListener {
       }
 
       if (!printedAnyRoute) {
+        if (this.shouldRetryLostClaim(order, orderId)) {
+          // Nao marca como processado: se o outro aparelho falhar e soltar a
+          // reserva, a nova conferencia precisa conseguir imprimir.
+          logger.info(
+            `${this.getLogContext()} Pedido #${order.order_number || orderId} já reivindicado por outro aparelho. Nova conferência em ${LOST_CLAIM_RECHECK_MS / 1000}s.`
+          );
+          return;
+        }
         logger.info(
-          `${this.getLogContext()} Pedido #${order.order_number || orderId} já reivindicado por outro Hub. Auto print ignorado para evitar duplicidade.`
+          `${this.getLogContext()} Pedido #${order.order_number || orderId}: outro aparelho manteve a reserva por ${LOST_CLAIM_GIVE_UP_MS / 1000}s. Considerado impresso por ele.`
         );
         this.processedOrderIds.add(orderId);
         this.trimRuntimeCache(this.processedOrderIds);
         return;
       }
 
+      this.lostClaimSince.delete(orderId);
       this.processedOrderIds.add(orderId);
       this.trimRuntimeCache(this.processedOrderIds);
       logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId} impresso e registrado.`);
@@ -2475,7 +2867,8 @@ class PairedPrintListener {
       try {
         const payloads = await this.fetchRenderedPayloads(
           orderId,
-          availableVias.map((via) => via.printType)
+          availableVias.map((via) => via.printType),
+          order
         );
         renderMs = this.getPrintPerformanceElapsed(renderStartedAt);
         return payloads;
@@ -2649,6 +3042,8 @@ class PairedPrintListener {
     });
     const printResults = await Promise.allSettled(printTasks.map((entry) => entry.promise));
     const routeFailures = [];
+    const printedCount = printResults.filter((result) => result.status === 'fulfilled' && result.value === 'printed').length;
+    const skippedCount = printResults.filter((result) => result.status === 'fulfilled' && result.value === 'skipped').length;
 
     printResults.forEach((result, index) => {
       const { via, timings, taskState } = printTasks[index];
@@ -2684,6 +3079,7 @@ class PairedPrintListener {
     if (resolverFailures.length > 0) {
       throw resolverFailures[0];
     }
+    return { printedCount, skippedCount };
   }
 
   /**
@@ -2750,6 +3146,10 @@ class PairedPrintListener {
 
     try {
       await this.refreshPrintSettings();
+      if (!this.isAutoPrintStation()) {
+        logger.info(`${this.getLogContext()} Print job ${jobId} fica com ${this.printSettings.autoPrintStation?.label || 'o computador escolhido'}. Ignorado aqui.`);
+        return;
+      }
       if (!shouldProcessQueuedPrintJob(this.printSettings, job)) {
         logger.info(`${this.getLogContext()} Print job ${jobId} ignorado: não pertence ao modo automático ativo da loja.`);
         return;

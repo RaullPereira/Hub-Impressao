@@ -1,5 +1,5 @@
 // Valida que bebidas dentro de promocao continuam indo para o destaque do motoboy
-// e que a promocao indica que a bebida foi deslocada para esse destaque.
+// (layout oficial do web: a bebida sai so no bloco ATENCAO MOTOBOY, depois da promocao).
 //
 // Rodar: node tests/promotion-beverage-highlight.test.js
 
@@ -57,12 +57,12 @@ const order = {
   ],
 };
 
-const text = generateOrderPrintData(order, 'counter', { highlightBeverages: true }).join('');
+const text = generateOrderPrintData(order, 'counter', { highlightBeverages: true }).join('').toUpperCase();
 
 checkContains('promocao impressa', text, 'PROMO: COMBO 8 ESFIHAS + REFRI 1 LT');
-checkContains('promocao indica bebida destacada', text, 'BEBIDA NO DESTAQUE DO MOTOBOY');
 checkContains('secao motoboy impressa', text, 'ATENCAO MOTOBOY');
-checkContains('bebida no destaque', text, 'Pepsi 1 Litro');
+checkContains('bebida no destaque', text.slice(text.indexOf('ATENCAO MOTOBOY')), 'PEPSI 1 LITRO');
+checkContains('bebida sai uma unica vez', String(text.split('PEPSI 1 LITRO').length - 1), '1');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

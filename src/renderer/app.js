@@ -53,6 +53,14 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('log-type')?.addEventListener('change', () => {
     void loadLogs();
   });
+  document.getElementById('export-diagnostics')?.addEventListener('click', () => {
+    void exportDiagnostics();
+  });
+  document.getElementById('open-logs-folder')?.addEventListener('click', () => {
+    void window.api?.openLogsFolder?.();
+  });
+  void showAppVersion();
+  void setupUpdateNotice();
 
   void initializeScreen();
 
@@ -178,9 +186,11 @@ async function loadOperationalStatus() {
     }
 
     if (ownerEl) {
-      ownerEl.textContent = pairingStatus?.controlsAutoPrint
-        ? 'Hub local'
-        : 'Fallback';
+      ownerEl.textContent = pairingStatus?.isAutoPrintStation === false
+        ? `Fica com ${pairingStatus?.autoPrintStationLabel || 'outro computador'}`
+        : pairingStatus?.controlsAutoPrint
+          ? 'Este computador'
+          : 'Fallback';
     }
 
     const storePrinters = getActiveStorePrinters(settings, pairingStatus);
@@ -428,14 +438,98 @@ window.testPrint = async function testPrint() {
 };
 
 async function addManualPrinter() {
-  const name = prompt('Digite o nome exato da impressora (como aparece no Windows)');
-  if (!name) return;
+  const typed = prompt('Nome da impressora no Windows ou IP da impressora de rede (ex.: 192.168.0.107)');
+  if (!typed) return;
+  // Só o IP (com ou sem porta) vira impressora de rede "TCP:IP:porta".
+  const ip = /^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?$/.exec(typed.trim());
+  const name = ip ? `TCP:${ip[1]}:${ip[2] || 9100}` : typed.trim();
 
   try {
-    await window.api.addManualPrinter({ name: name.trim() });
+    await window.api.addManualPrinter({ name });
     await loadPrinters();
     alert('Impressora adicionada manualmente.');
   } catch (error) {
     alert(`Falha ao adicionar impressora: ${error?.message || error}`);
+  }
+}
+
+async function showAppVersion() {
+  const target = document.getElementById('app-version');
+  if (!target || !window.api?.getAppVersion) return;
+  try {
+    target.textContent = `v${await window.api.getAppVersion()}`;
+  } catch {
+    target.textContent = '';
+  }
+}
+
+function renderUpdateNotice(state) {
+  const box = document.getElementById('update-notice');
+  const text = document.getElementById('update-notice-text');
+  const button = document.getElementById('update-install');
+  if (!box || !text || !button) return;
+  const version = state?.version ? ` ${state.version}` : '';
+  if (state?.status === 'downloading') {
+    const percent = Number.isFinite(state.percent) ? ` (${state.percent}%)` : '';
+    text.textContent = `Baixando atualização${version}${percent}...`;
+    button.hidden = true;
+    box.hidden = false;
+    return;
+  }
+  if (state?.status === 'ready' || state?.status === 'installing') {
+    text.textContent = `Atualização${version} pronta. O Hub fecha e abre de novo sozinho em menos de 1 minuto.`;
+    button.hidden = false;
+    button.disabled = state.status === 'installing';
+    button.textContent = state.status === 'installing' ? 'Atualizando...' : 'Atualizar agora';
+    box.hidden = false;
+    return;
+  }
+  box.hidden = true;
+}
+
+async function setupUpdateNotice() {
+  if (!window.api?.getUpdateState) return;
+  window.api.on?.('update-state', renderUpdateNotice);
+  document.getElementById('update-install')?.addEventListener('click', async () => {
+    setStatus('update-notice-status', '');
+    try {
+      const result = await window.api.installUpdate();
+      if (!result?.success) {
+        setStatus('update-notice-status', result?.error || 'Não foi possível iniciar a atualização.', 'error');
+      }
+    } catch (error) {
+      setStatus('update-notice-status', `Não foi possível iniciar a atualização: ${error?.message || error}`, 'error');
+    }
+  });
+  try {
+    renderUpdateNotice(await window.api.getUpdateState());
+  } catch {
+    renderUpdateNotice(null);
+  }
+}
+
+async function exportDiagnostics() {
+  const button = document.getElementById('export-diagnostics');
+  if (!window.api?.exportDiagnostics) {
+    setStatus('export-diagnostics-status', 'Esta versão não consegue exportar os logs.', 'error');
+    return;
+  }
+  if (button) button.disabled = true;
+  setStatus('export-diagnostics-status', 'Gerando arquivo de logs...');
+  try {
+    const result = await window.api.exportDiagnostics();
+    if (result?.canceled) {
+      setStatus('export-diagnostics-status', '');
+      return;
+    }
+    setStatus(
+      'export-diagnostics-status',
+      `Arquivo salvo em ${result?.filePath || 'pasta escolhida'}. Envie esse arquivo para o suporte pelo WhatsApp.`,
+      'success'
+    );
+  } catch (error) {
+    setStatus('export-diagnostics-status', `Não foi possível gerar o arquivo: ${error?.message || error}`, 'error');
+  } finally {
+    if (button) button.disabled = false;
   }
 }

@@ -1,3 +1,4 @@
+const os = require('os');
 const Settings = require('../config/settings');
 const logger = require('../utils/logger');
 const PairedPrintListener = require('./paired-print-listener');
@@ -67,7 +68,9 @@ class MultiPairedPrintListener {
         autoPrintOnAcceptEnabled: false,
         kdsReadyPrintEnabled: false,
         kdsReadyPrintRoutes: [],
-        lastError: null
+        lastError: null,
+        stationId: Settings.getStationId(),
+        stationLabel: os.hostname()
       };
     }
 
@@ -95,7 +98,9 @@ class MultiPairedPrintListener {
       autoPrintOnAcceptEnabled: false,
       kdsReadyPrintEnabled: false,
       kdsReadyPrintRoutes: [],
-      lastError: null
+      lastError: null,
+      stationId: Settings.getStationId(),
+      stationLabel: os.hostname()
     };
   }
 
@@ -141,7 +146,10 @@ class MultiPairedPrintListener {
     const listener = this.listeners.get(normalizedAdminClientId);
     if (!listener) return false;
 
-    return listener.getStatus().autoPrintEnabled === true;
+    const status = listener.getStatus();
+    // Computador escolhido no painel e outro: impressao automatica que chega
+    // pelo WebSocket/HTTP local tambem e recusada aqui (navegador antigo em cache).
+    return status.autoPrintEnabled === true && status.isAutoPrintStation !== false;
   }
 
   shouldDeferOrderUntilAccept(adminClientId, orderData) {
@@ -195,6 +203,8 @@ class MultiPairedPrintListener {
       kdsReadyPrintEnabled: pairings.length === 1 ? firstPairing.kdsReadyPrintEnabled : false,
       kdsReadyPrintRoutes: pairings.length === 1 ? firstPairing.kdsReadyPrintRoutes : [],
       lastError: null,
+      stationId: Settings.getStationId(),
+      stationLabel: os.hostname(),
       pairedCount,
       activeCount,
       pairings

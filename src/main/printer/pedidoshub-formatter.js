@@ -222,19 +222,24 @@ function generateKitchenPrintData(order, printSettings) {
   const orderNum = String(order.order_number || order.orderNumber || order.id || '0').padStart(3, '0');
   const displayId = isIfood ? (cd?.displayId || order.displayId || order.display_id || orderNum) : orderNum;
   const orderType = order.order_type || order.orderType;
-  const customerName = normalizeText(order.customer_name || order.customerName || 'Cliente');
+  const customerName = normalizeText(order.customer_name || order.customerName || 'Cliente').toUpperCase();
   const scheduledAt = order.scheduled_at || order.scheduledAt;
 
   let typeLabel = 'RETIRADA';
   if (orderType === 'delivery') typeLabel = scheduledAt ? 'ENTREGA AGENDADA' : 'ENTREGA';
-  else if (orderType === 'mesa') typeLabel = `MESA ${order.table_number || order.tableNumber || ''}`.trim();
+  else if (orderType === 'mesa') typeLabel = `MESA ${order.table_number || order.tableNumber || ''}`.trim().toUpperCase();
   else if (scheduledAt) typeLabel = 'RETIRADA AGENDADA';
 
-  const headline = isIfood ? `iFood #${displayId}` : `#${displayId} ${typeLabel}`;
+  // Mesmo padrão da comanda do sistema web: número grande sozinho, tipo/mesa embaixo.
+  const headline = isIfood ? `iFood #${displayId}` : `PEDIDO #${displayId}`;
   data.push(CMD.ALIGN_CENTER);
   data.push(bigSizeFor(headline, cols));
   data.push(CMD.medium_ON);
   data.push(`${headline}\n`);
+  if (!isIfood) {
+    data.push(CMD.TXT_DOUBLE_H);
+    data.push(`${normalizeText(typeLabel).toUpperCase()}\n`);
+  }
   data.push(CMD.medium_OFF);
   data.push(CMD.TXT_NORMAL);
   data.push(separatorFine);
@@ -517,7 +522,7 @@ function generateIfoodPrintData(order, printSettings) {
   if (orderType === 'balcao') typeLabel = 'Pra Retirar';
   else if (orderType === 'mesa') typeLabel = 'Na Mesa';
 
-  const customerName = normalizeText(order.customer_name || order.customerName || 'Cliente');
+  const customerName = normalizeText(order.customer_name || order.customerName || 'Cliente').toUpperCase();
   const customerPhone = order.customer_phone || order.customerPhone || '';
   const created = new Date(order.created_at || order.createdAt || Date.now());
   const deliveryTimeStr = cd?.expectedDeliveryTime;
@@ -846,14 +851,16 @@ function generateCounterPrintData(order, printSettings) {
 
   let typeLabel = 'RETIRADA';
   if (orderType === 'delivery') typeLabel = scheduledAt ? 'ENTREGA AGENDADA' : 'ENTREGA';
-  else if (orderType === 'mesa') typeLabel = `MESA ${order.table_number || order.tableNumber || ''}`.trim();
+  else if (orderType === 'mesa') typeLabel = `MESA ${order.table_number || order.tableNumber || ''}`.trim().toUpperCase();
   else if (isService) typeLabel = 'AGENDAMENTO';
   else if (scheduledAt) typeLabel = 'RETIRADA AGENDADA';
 
   if (!isService) {
-    data.push(is58mm ? CMD.TXT_DOUBLE_H : bigSizeFor(`#${orderNum} ${typeLabel}`, cols));
+    data.push(bigSizeFor(`PEDIDO #${orderNum}`, cols));
     data.push(CMD.medium_ON);
-    data.push(`#${orderNum} ${typeLabel}\n`);
+    data.push(`PEDIDO #${orderNum}\n`);
+    data.push(CMD.TXT_DOUBLE_H);
+    data.push(`${normalizeText(typeLabel).toUpperCase()}\n`);
     data.push(CMD.medium_OFF);
     data.push(CMD.TXT_NORMAL);
   }
@@ -875,7 +882,7 @@ function generateCounterPrintData(order, printSettings) {
 
   data.push(separatorFine);
 
-  const customerName = normalizeText(order.customer_name || order.customerName || 'Consumidor');
+  const customerName = normalizeText(order.customer_name || order.customerName || 'Consumidor').toUpperCase();
   const customerPhone = order.customer_phone || order.customerPhone || '';
   if (settings.showCustomerInfo !== false) {
     data.push(CMD.ALIGN_LEFT);
@@ -1035,6 +1042,25 @@ function generateCounterPrintData(order, printSettings) {
     if (!itemsByCategory[bucket]) itemsByCategory[bucket] = [];
     itemsByCategory[bucket].push(item);
   });
+
+  // "PIZZA PEQUENA" como título e logo abaixo "PIZZA: PEQUENA" no item: o título sobra.
+  const headingWords = (text) => normalizeText(String(text || '')).toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '').split(/[^a-z0-9]+/).filter(Boolean)
+    .map((word) => word.replace(/s$/, ''));
+  const categoryRepeatsInItems = (category, items) => {
+    const categoryWords = headingWords(category);
+    if (categoryWords.length === 0 || !items.length) return false;
+    return items.every((item) => {
+      const hasFlavors = (Array.isArray(item.flavors) && item.flavors.length > 0)
+        || (Array.isArray(item.halfFlavors) && item.halfFlavors.length > 0);
+      const line = new Set(headingWords([
+        hasFlavors ? 'pizza' : '',
+        item.sizeLabel || item.sizeName || item.size,
+        hasFlavors ? '' : (item.product_name || item.productName || item.name),
+      ].join(' ')));
+      return categoryWords.every((word) => line.has(word));
+    });
+  };
 
   const printCounterItem = (item, isPromoChild = false, category = '') => {
     if (item.isMarmita && Array.isArray(item.marmitaSelections)) {
@@ -1251,7 +1277,7 @@ function generateCounterPrintData(order, printSettings) {
   });
 
   Object.keys(itemsByCategory).sort().forEach((category) => {
-    if (settings.groupByCategory && category !== '_all') {
+    if (settings.groupByCategory && category !== '_all' && !categoryRepeatsInItems(category, itemsByCategory[category])) {
       pushSectionTitle(category);
     }
 
@@ -1483,10 +1509,60 @@ function generateCounterPrintData(order, printSettings) {
   return data;
 }
 
+// Layout oficial do Pedidos Hub web, empacotado por scripts/sync-web-formatter.js.
+// A comanda de reserva do Hub sai igual a do web; o layout antigo deste
+// arquivo so entra se o pacote faltar ou der erro (o papel nao pode deixar de sair).
+let webFormatter;
+function loadWebFormatter() {
+  if (webFormatter !== undefined) return webFormatter;
+  try {
+    webFormatter = require('./web-formatter.generated');
+  } catch (_) {
+    webFormatter = null;
+  }
+  return webFormatter;
+}
+
+function generateWithWebFormatter(order, printType, printSettings) {
+  const web = loadWebFormatter();
+  if (!web) return null;
+
+  const previousStorage = globalThis.localStorage;
+  try {
+    const settings = printSettings && printSettings.__dbRow
+      ? web.mapPrintSettingsFromDB(printSettings.__dbRow)
+      : web.normalizePrintSettings(Object.assign({}, printSettings || {}));
+    // O formatador do web le configuracoes de um localStorage: aqui e so memoria.
+    const memory = new Map([['print_settings', JSON.stringify(settings)]]);
+    globalThis.localStorage = {
+      getItem: (key) => (memory.has(key) ? memory.get(key) : null),
+      setItem: (key, value) => { memory.set(String(key), String(value)); },
+      removeItem: (key) => { memory.delete(key); },
+      clear: () => memory.clear()
+    };
+    web.setPrintSettingsCache(settings);
+    const commands = web.generateOrderPrintData(web.normalizeOrderForPrint(order, {}), printType, settings);
+    return Array.isArray(commands) && commands.join('') ? commands : null;
+  } catch (_) {
+    return null;
+  } finally {
+    if (previousStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previousStorage;
+  }
+}
+
 function generateOrderPrintData(order, printType = 'counter', printSettings) {
   if (order?._customPrintData && Array.isArray(order._customPrintData)) {
     return order._customPrintData;
   }
+
+  const official = generateWithWebFormatter(order, printType, printSettings);
+  if (official) return official;
+
+  return generateLegacyOrderPrintData(order, printType, printSettings);
+}
+
+function generateLegacyOrderPrintData(order, printType = 'counter', printSettings) {
 
   if (printType === 'kitchen') {
     return generateKitchenPrintData(order, printSettings);
@@ -1507,5 +1583,6 @@ module.exports = {
   DEFAULT_PRINT_SETTINGS,
   getNormalizedSettings,
   generateOrderPrintData,
+  generateLegacyOrderPrintData,
   normalizeText
 };

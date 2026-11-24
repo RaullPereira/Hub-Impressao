@@ -13,7 +13,7 @@ test('workshop orders are excluded from every automatic print entry point', () =
   assert.match(source, /customData\.manual_print_only === true/);
   assert.match(source, /customData\.workshop_vehicle/);
   assert.match(source, /async handleAutoPrintOrder\(order, source\)[\s\S]*?if \(isManualPrintOnlyOrder\(order\)\)/);
-  assert.match(source, /const eligibleOrders = \(recentOrders \|\| \[\]\)\.filter\(\(order\) => \{[\s\S]*?if \(isManualPrintOnlyOrder\(order\)\) return false/);
+  assert.match(source, /const eligibleOrders = Array\.from\(ordersById\.values\(\)\)\.filter\(\(order\) => \{[\s\S]*?if \(isManualPrintOnlyOrder\(order\)\) return false/);
 });
 
 test('manual print jobs remain available', () => {

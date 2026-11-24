@@ -102,12 +102,55 @@ class TrayManager {
     });
   }
 
+  refreshMenu() {
+    if (!this.tray) return;
+    try {
+      this.tray.setContextMenu(this.buildMenu());
+    } catch (error) {
+      logger.warn('Falha ao atualizar menu da bandeja', error && error.message ? error.message : error);
+    }
+  }
+
+  notifyUpdateReady(version) {
+    if (!this.tray || process.platform !== 'win32' || typeof this.tray.displayBalloon !== 'function') return;
+    try {
+      this.tray.displayBalloon({
+        title: 'Atualização do Hub Impressão pronta',
+        content: `A versão ${version || 'nova'} já foi baixada. Abra o Hub e clique em "Atualizar agora".`
+      });
+    } catch (error) {
+      logger.warn('Falha ao mostrar aviso de atualização', error && error.message ? error.message : error);
+    }
+  }
+
+  buildUpdateMenuItems() {
+    const state = this.mainApp.updater && typeof this.mainApp.updater.getState === 'function'
+      ? this.mainApp.updater.getState()
+      : null;
+    if (!state || state.status !== 'ready') return [];
+    return [
+      {
+        label: `Atualizar agora para ${state.version || 'nova versão'}`,
+        click: () => {
+          void this.mainApp.installUpdate().then((result) => {
+            if (!result || !result.success) {
+              logger.warn(`Atualização pela bandeja não iniciada: ${result && result.error}`);
+              this.mainApp.createConfigWindow();
+            }
+          });
+        }
+      },
+      { type: 'separator' }
+    ];
+  }
+
   buildMenu() {
     // Verificar se auto-start está ativado
     const loginSettings = app.getLoginItemSettings();
     const autoStartEnabled = loginSettings.openAtLogin;
     
     return Menu.buildFromTemplate([
+      ...this.buildUpdateMenuItems(),
       {
         label: 'Abrir Painel',
         click: () => this.mainApp.createConfigWindow()

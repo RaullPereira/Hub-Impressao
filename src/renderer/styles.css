@@ -144,6 +144,33 @@ body {
   margin-bottom: 0.75rem;
 }
 
+.update-notice {
+  margin-bottom: 0.75rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid rgba(101, 163, 13, 0.35);
+  border-radius: var(--radius);
+  background: #f3f9ea;
+  font-size: 0.8rem;
+  color: var(--text-primary);
+}
+.update-notice[hidden],
+.update-notice-button[hidden] {
+  display: none;
+}
+.update-notice-button {
+  width: 100%;
+  margin-top: 0.5rem;
+  min-height: 32px;
+  padding: 0.4rem 0.6rem;
+}
+.update-notice-status {
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+.update-notice-status:empty {
+  display: none;
+}
 .support-block {
   margin-top: 0.5rem;
 }

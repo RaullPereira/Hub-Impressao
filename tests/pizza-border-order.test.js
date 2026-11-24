@@ -48,7 +48,7 @@ function assertOrder(printType) {
   const borderValueIndex = printed.indexOf('CHOCOLATE');
   const flavorIndex = printed.indexOf('CALABRESA');
 
-  check(`${printType} contem PIZZA: GRANDE`, printed.includes('PIZZA: GRANDE'));
+  check(`${printType} contem PIZZA GRANDE`, /PIZZA:? GRANDE/.test(printed));
   check(`${printType} contem borda`, borderLabelIndex >= 0 && borderValueIndex >= 0);
   check(`${printType} contem sabor`, flavorIndex >= 0);
   check(

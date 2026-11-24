@@ -1,5 +1,6 @@
 const logger = require('../utils/logger');
 const winSpool = require('./win-spool');
+const networkPrinters = require('./network-printers');
 const pedidosHubFormatter = require('./pedidoshub-formatter');
 const { formatManualTextPrint } = require('./manual-text-formatter');
 const Settings = require('../config/settings');
@@ -27,13 +28,32 @@ function isLegacyWindowsPrintMode() {
   return process.env.HUB_FORCE_LEGACY_TEXT_PRINT === '1';
 }
 
+const DEFAULT_PRINTER_LOOKUP_MS = 10 * 60 * 1000;
+const NETWORK_SCAN_INTERVAL_MS = 5 * 60 * 1000;
+
 class WindowsPrinterManager {
   constructor() {
     this.printers = Settings.getCachedWindowsPrinters();
     this._discoveryTimer = null;
     this._refreshPromise = null;
     this._lastRefreshAt = 0;
-    this._refreshCacheMs = 15000;
+    this._refreshCacheMs = 50000;
+    this._lastListKey = null;
+    this._defaultPrinterName = null;
+    this._lastDefaultLookupAt = 0;
+    this.networkPrinters = [];
+    this._networkScanTimer = null;
+  }
+
+  async refreshNetworkPrinters() {
+    try {
+      const names = await networkPrinters.scanNetworkPrinters();
+      this.networkPrinters = names.map((name) => ({ id: name, name, type: 'NETWORK', isDefault: false, status: 'ready' }));
+      logger.info(`[network] Impressoras de rede: ${names.join(', ') || 'nenhuma'}`);
+    } catch (err) {
+      logger.warn('[network] Falha ao procurar impressoras de rede:', err.message || err);
+    }
+    return this.networkPrinters;
   }
 
   startAutoDiscovery(intervalMs = 10000) {
@@ -43,12 +63,19 @@ class WindowsPrinterManager {
       clearInterval(this._discoveryTimer);
     }
     this._discoveryTimer = setInterval(() => this.refreshPrinters(), intervalMs);
+    void this.refreshNetworkPrinters();
+    if (this._networkScanTimer) clearInterval(this._networkScanTimer);
+    this._networkScanTimer = setInterval(() => { void this.refreshNetworkPrinters(); }, NETWORK_SCAN_INTERVAL_MS);
   }
 
   stopAutoDiscovery() {
     if (this._discoveryTimer) {
       clearInterval(this._discoveryTimer);
       this._discoveryTimer = null;
+    }
+    if (this._networkScanTimer) {
+      clearInterval(this._networkScanTimer);
+      this._networkScanTimer = null;
     }
     if (typeof winSpool.stopPersistentWorker === 'function') {
       void winSpool.stopPersistentWorker().catch((error) => {
@@ -75,6 +102,17 @@ class WindowsPrinterManager {
           .filter(Boolean)
           .filter((name) => !isVirtualPrinterName(name));
 
+        const listKey = physicalPrinterNames.map(normalizePrinterName).join('|');
+        const listChanged = listKey !== this._lastListKey;
+        // A impressora padrao so serve para marcar a lista na tela. Consultar
+        // a cada descoberta abria mais um PowerShell a cada ciclo.
+        const defaultLookupDue = force || listChanged ||
+          (Date.now() - this._lastDefaultLookupAt) > DEFAULT_PRINTER_LOOKUP_MS;
+        if (defaultLookupDue) {
+          this._defaultPrinterName = await winSpool.getDefaultPrinter();
+          this._lastDefaultLookupAt = Date.now();
+        }
+
         this.printers = physicalPrinterNames.map((name) => ({
           id: name,
           name,
@@ -82,14 +120,17 @@ class WindowsPrinterManager {
           isDefault: false,
           status: 'ready'
         }));
-        const def = await winSpool.getDefaultPrinter();
+        const def = this._defaultPrinterName;
         if (def) {
           const p = this.printers.find(p => normalizePrinterName(p.name) === normalizePrinterName(def));
           if (p) p.isDefault = true;
         }
         Settings.setCachedWindowsPrinters(this.printers);
         this._lastRefreshAt = Date.now();
-        logger.info(`[win-spool] Impressoras fisicas atuais: ${this.printers.map((p) => p.name).join(', ') || 'nenhuma'}`);
+        if (listChanged) {
+          this._lastListKey = listKey;
+          logger.info(`[win-spool] Impressoras fisicas atuais: ${this.printers.map((p) => p.name).join(', ') || 'nenhuma'}`);
+        }
         return this.printers;
       } catch (err) {
         logger.error('Erro ao listar impressoras via win-spool:', err);
@@ -111,10 +152,16 @@ class WindowsPrinterManager {
     if (!this.printers.length && !this._refreshPromise) {
       void this.refreshPrinters();
     }
-    return this.printers;
+    // Impressora de rede cadastrada à mão (TCP:IP) entra mesmo se a busca não achou.
+    const found = new Set(this.networkPrinters.map((printer) => printer.name.toLowerCase()));
+    const manualNetwork = (Settings.getManualPrinters() || [])
+      .filter((name) => networkPrinters.parseNetworkPrinterName(name) && !found.has(String(name).trim().toLowerCase()))
+      .map((name) => ({ id: String(name).trim(), name: String(name).trim(), type: 'NETWORK', isDefault: false, status: 'ready' }));
+    return [...this.printers, ...this.networkPrinters, ...manualNetwork];
   }
 
   async resolveAvailablePrinterName(printerName, { allowDefault = true, forceRefresh = false } = {}) {
+    if (networkPrinters.parseNetworkPrinterName(printerName)) return String(printerName).trim();
     const requested = normalizePrinterName(printerName);
     // O auto-discovery mantém esta lista atualizada em background. No caminho
     // normal de impressão, usar o cache evita executar Get-Printer/PowerShell
@@ -140,6 +187,7 @@ class WindowsPrinterManager {
   }
 
   async ensurePrinterAvailable(printerName) {
+    if (networkPrinters.parseNetworkPrinterName(printerName)) return String(printerName).trim();
     const selectedPrinter = await this.resolveAvailablePrinterName(printerName, { allowDefault: false });
     if (!selectedPrinter) {
       const available = this.printers.map((printer) => printer.name).join(', ') || 'nenhuma';
@@ -207,6 +255,11 @@ class WindowsPrinterManager {
   }
 
   async _printBuffer(printerName, buffer, { preserveRaw = false } = {}) {
+    if (networkPrinters.parseNetworkPrinterName(printerName)) {
+      await networkPrinters.sendRawToNetworkPrinter(printerName, buffer);
+      logger.info(`[print] Impressão RAW enviada pela rede para ${printerName}`);
+      return { success: true, mode: 'network' };
+    }
     if (!preserveRaw && isLegacyWindowsPrintMode() && typeof winSpool.printText === 'function') {
       try {
         const printableText = typeof winSpool.bufferToPrintableText === 'function'

@@ -1,8 +1,9 @@
-// Regression check for the Hub Impressao fallback counter formatter on 58mm.
+// Regression check for the Hub Impressao last-resort (legacy) counter formatter on 58mm.
+// The normal fallback now uses the official web layout (see web-formatter-parity.test.js).
 //
 // Run: node tests/counter-58mm-compact-layout.test.js
 
-const { generateOrderPrintData } = require('../src/main/printer/pedidoshub-formatter');
+const { generateLegacyOrderPrintData: generateOrderPrintData } = require('../src/main/printer/pedidoshub-formatter');
 
 let pass = 0;
 let fail = 0;

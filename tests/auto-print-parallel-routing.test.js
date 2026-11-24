@@ -282,7 +282,8 @@ const order = {
         Settings.getStorePrinters = originalGetStorePrinters;
       }
 
-      assert.deepStrictEqual(queriedTables, ['orders']);
+      // created_at (pedidos novos) + updated_at (rascunhos concluidos)
+      assert.deepStrictEqual(queriedTables, ['orders', 'orders']);
       assert.deepStrictEqual(claims, ['kitchen', 'attendance']);
       assert.deepStrictEqual(prints, ['kitchen']);
       assert.strictEqual(listener.processedOrderIds.has(recoveredOrder.id), true);
@@ -299,8 +300,8 @@ const order = {
 
       listener.printSettings.autoPrintEnabled = true;
       listener.printSettings.autoPrintRoutes = ['kitchen', 'counter'];
-      listener.hasPrintJobWithStatuses = async (_orderId, statuses) => {
-        statusQueries.push(statuses);
+      listener.hasPendingRoutePrintJob = async () => {
+        statusQueries.push(['pending']);
         return false;
       };
       listener.claimAutoPrintLedger = async (_orderId, route) => {
@@ -347,8 +348,8 @@ const order = {
 
       listener.printSettings.autoPrintEnabled = true;
       listener.printSettings.autoPrintRoutes = ['kitchen', 'counter'];
-      listener.hasPrintJobWithStatuses = async (_orderId, statuses) => {
-        statusQueries.push(statuses);
+      listener.hasPendingRoutePrintJob = async () => {
+        statusQueries.push(['pending']);
         return true;
       };
       listener.claimAutoPrintLedger = async () => {

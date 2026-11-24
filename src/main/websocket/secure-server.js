@@ -191,7 +191,7 @@ class SecureWebSocketServer {
             logger.error(`Erro no servidor WebSocket da porta ${port}:`, error);
           });
           logger.info(`Servidor WebSocket rodando em ws://localhost:${port}`);
-          logger.info(`Token de segurança: ${this.token}`);
+          logger.info('Token de segurança do WebSocket gerado.');
           resolve();
         };
 
@@ -236,8 +236,8 @@ class SecureWebSocketServer {
   async handleMessage(ws, message) {
     try {
       const data = JSON.parse(message.toString());
-      logger.info('Mensagem recebida via WebSocket:', { raw: message.toString(), json: data });
-      logger.info(`Tipo de mensagem recebida: ${data.type}`);
+      // Sem o conteudo da mensagem: ela traz o token e a comanda inteira em base64.
+      logger.info(`Mensagem WebSocket: tipo=${data.type || 'print'} loja=${data.storeId || data.adminClientId || '-'} pedido=${data.orderData?.order_number || data.orderId || '-'} bytes=${message.length}`);
 
       // Novo: Listar impressoras (garante refresh antes de responder)
       if (data.type === 'list-printers') {

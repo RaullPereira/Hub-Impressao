@@ -278,7 +278,6 @@ async function listPrintersViaRegistry() {
   }
 
   const uniquePrinters = uniqueStrings(printers);
-  logger.info('[win-spool] listPrinters - registry printers=' + uniquePrinters.length);
   return uniquePrinters;
 }
 
@@ -293,38 +292,42 @@ async function listPrinters() {
     }
   }
 
-  try {
-    if (legacyWindows) {
-      throw new Error('LEGACY_WINDOWS_SKIP_POWERSHELL');
-    }
+  const attempts = [
+    ...(legacyWindows ? [] : [['powershell', 'powershell -NoProfile -Command "Get-Printer | Select-Object -ExpandProperty Name"']]),
+    ['wmic', 'wmic printer get Name /value'],
+    ['Get-WmiObject', 'powershell -NoProfile -Command "Get-WmiObject Win32_Printer | Select-Object -ExpandProperty Name"']
+  ];
 
-    const { stdout } = await execWithTimeout('powershell -NoProfile -Command "Get-Printer | Select-Object -ExpandProperty Name"');
-    logger.info('[win-spool] listPrinters - powershell stdout length=' + String((stdout||'').length));
-    return parsePrinterList(stdout);
-  } catch (err) {
-    logger.warn('[win-spool] listPrinters - powershell failed: ' + (err && err.message ? err.message : String(err)));
+  // Uma tentativa vazia também passa para a próxima: PowerShell bloqueado por
+  // antivírus/política, Spooler lento ou Windows 11 24H2 sem wmic deixavam a
+  // lista de impressoras vazia mesmo com a impressora instalada.
+  for (const [label, command] of attempts) {
     try {
-      const { stdout } = await execWithTimeout('wmic printer get Name /value');
-      logger.info('[win-spool] listPrinters - wmic stdout length=' + String((stdout||'').length));
-      return parsePrinterList(stdout);
-    } catch (e) {
-      logger.warn('[win-spool] listPrinters - wmic failed: ' + (e && e.message ? e.message : String(e)));
-      try {
-        const { stdout } = await execWithTimeout('powershell -NoProfile -Command "Get-WmiObject Win32_Printer | Select-Object -ExpandProperty Name"');
-        logger.info('[win-spool] listPrinters - Get-WmiObject stdout length=' + String((stdout || '').length));
-        return parsePrinterList(stdout);
-      } catch (fallbackError) {
-        logger.error('[win-spool] listPrinters - Get-WmiObject failed: ' + (fallbackError && fallbackError.message ? fallbackError.message : String(fallbackError)));
-        return [];
-      }
+      const { stdout } = await execWithTimeout(command);
+      const printers = parsePrinterList(stdout);
+      if (printers.length > 0) return printers;
+      logger.warn(`[win-spool] listPrinters - ${label} returned no printers`);
+    } catch (err) {
+      const reason = err && err.killed
+        ? `timeout (${COMMAND_TIMEOUT_MS}ms)`
+        : `code=${err && err.code} stderr=${String((err && err.stderr) || '').trim().slice(0, 300) || '(vazio)'}`;
+      logger.warn(`[win-spool] listPrinters - ${label} failed: ${reason}`);
     }
   }
+
+  // Último recurso em qualquer Windows: o Registro não depende de PowerShell nem wmic.
+  if (!legacyWindows) {
+    const registryPrinters = await listPrintersViaRegistry();
+    if (registryPrinters.length > 0) return registryPrinters;
+  }
+
+  logger.error('[win-spool] listPrinters - nenhuma impressora encontrada em nenhuma tentativa');
+  return [];
 }
 
 async function getDefaultPrinterViaWmic() {
   try {
     const { stdout } = await execWithTimeout('wmic printer where default=true get Name /value');
-    logger.info('[win-spool] getDefaultPrinter - stdout length=' + String((stdout||'').length));
     const p = parsePrinterList(stdout)[0];
     return p || null;
   } catch (err) {
@@ -355,7 +358,6 @@ async function getDefaultPrinter() {
 
   try {
     const { stdout } = await execWithTimeout('powershell -NoProfile -Command "(Get-Printer | Where-Object {$_.Default -eq $true}).Name"');
-    logger.info('[win-spool] getDefaultPrinter - stdout length=' + String((stdout||'').length));
     const p = parsePrinterList(stdout)[0];
     return p || null;
   } catch (err) {

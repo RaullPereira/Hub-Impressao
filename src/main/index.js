@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, nativeImage, powerMonitor } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerMonitor, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const TrayManager = require('./tray');
@@ -13,6 +13,7 @@ const SecureWebSocketServer = require('./websocket/secure-server');
 const Settings = require('./config/settings');
 const logger = require('./utils/logger');
 const MultiPairedPrintListener = require('./supabase/multi-paired-print-listener');
+const { HubUpdater } = require('./updater');
 
 const startHidden = process.argv.includes('--hidden');
 const localHttpPort = getEnvPort('HUB_HTTP_PORT', 3001);
@@ -78,6 +79,63 @@ class ThermalPrintApp {
     this.lastResumeRecoveryAt = 0;
     this.serviceWatchdogTimer = null;
     this.startupIssues = [];
+    this.activePrintJobs = 0;
+    this.updater = null;
+  }
+
+  // Conta impressoes em andamento para a atualizacao nao fechar o Hub no meio
+  // de uma comanda. Toda impressao passa por print()/testPrint().
+  trackPrintActivity(printerManager) {
+    ['print', 'testPrint'].forEach((method) => {
+      const original = printerManager && printerManager[method];
+      if (typeof original !== 'function') return;
+      printerManager[method] = async (...args) => {
+        this.activePrintJobs += 1;
+        try {
+          return await original.apply(printerManager, args);
+        } finally {
+          this.activePrintJobs = Math.max(0, this.activePrintJobs - 1);
+        }
+      };
+    });
+  }
+
+  startUpdater() {
+    this.updater = new HubUpdater({
+      isBusy: () => this.activePrintJobs > 0,
+      environment: {
+        platform: process.platform,
+        isPackaged: app.isPackaged,
+        variantName: process.env.HUB_VARIANT_NAME,
+        electronVersion: process.versions.electron,
+        currentVersion: app.getVersion()
+      }
+    });
+    let lastNotifiedVersion = null;
+    let lastStatus = null;
+    this.updater.on('state', (state) => {
+      if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+        this.mainWindow.webContents.send('update-state', state);
+      }
+      if (state.status !== lastStatus && this.tray && typeof this.tray.refreshMenu === 'function') {
+        this.tray.refreshMenu();
+      }
+      lastStatus = state.status;
+      if (state.status === 'ready' && state.version !== lastNotifiedVersion) {
+        lastNotifiedVersion = state.version;
+        if (this.tray && typeof this.tray.notifyUpdateReady === 'function') {
+          this.tray.notifyUpdateReady(state.version);
+        }
+      }
+    });
+    this.updater.start();
+  }
+
+  async installUpdate() {
+    if (!this.updater) return { success: false, error: 'Atualizador indisponível.' };
+    const result = await this.updater.installNow();
+    if (result.success) app.isQuiting = true;
+    return result;
   }
 
   async initialize() {
@@ -86,8 +144,10 @@ class ThermalPrintApp {
 
     try {
       this.printerManager = new PrinterManager();
-      this.printerManager.startAutoDiscovery(30000);
-      logger.info('Descoberta automática de impressoras iniciada (intervalo: 30s)');
+      this.trackPrintActivity(this.printerManager);
+      // 60s: impressora nao encontrada na hora de imprimir ja forca nova busca.
+      this.printerManager.startAutoDiscovery(60000);
+      logger.info('Descoberta automática de impressoras iniciada (intervalo: 60s)');
     } catch (error) {
       logger.error('Erro ao inicializar gerenciador de impressoras:', error);
       this.startupIssues.push(`Gerenciador de impressoras: ${error.message}`);
@@ -118,7 +178,7 @@ class ThermalPrintApp {
     try {
       this.wss = SecureWebSocketServer;
       await this.wss.start(localWebSocketPort, this.printerManager, this.pairedPrintListener);
-      logger.info(`Token WebSocket: ${this.wss.getToken()}`);
+      logger.info('Servidor WebSocket local iniciado.');
     } catch (error) {
       logger.error('Erro ao iniciar servidor WebSocket local:', error);
       try {
@@ -184,17 +244,15 @@ class ThermalPrintApp {
       logger.info('Main window ready-to-show -> show() called');
     });
 
-    this.mainWindow.on('close', (event) => {
-      if (!app.isQuiting) {
-        event.preventDefault();
-        this.mainWindow.hide();
-        logger.info('Main window close intercepted -> hide() called');
-      }
-    });
-
+    // Fechar ou minimizar destroi a janela em vez de esconder: escondida, a
+    // tela continuava ocupando um processo do Chromium o dia todo. A impressao
+    // roda no processo principal e nao depende da janela; o icone da bandeja
+    // abre uma janela nova quando preciso.
     this.mainWindow.on('minimize', (event) => {
       event.preventDefault();
-      this.mainWindow.hide();
+      if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+        this.mainWindow.close();
+      }
     });
 
     this.mainWindow.on('closed', () => {
@@ -211,6 +269,8 @@ class ThermalPrintApp {
       clearInterval(this.serviceWatchdogTimer);
       this.serviceWatchdogTimer = null;
     }
+
+    if (this.updater) this.updater.stop();
 
     try {
       if (this.pairedPrintListener) {
@@ -326,6 +386,12 @@ app.whenReady().then(async () => {
   }
 
   setupAutoStart();
+
+  try {
+    thermalApp.startUpdater();
+  } catch (error) {
+    logger.warn('Falha ao iniciar atualizador:', error && error.message ? error.message : error);
+  }
 
   if (!startHidden || startupResult.success === false) {
     thermalApp.createConfigWindow();
@@ -495,6 +561,86 @@ ipcMain.handle('get-logs', async (event, options = {}) => {
       print: logger.getLogFilePath('print')
     }
   };
+});
+
+function buildDiagnosticSettingsSummary() {
+  const settings = Settings.getAll();
+  const printers = thermalApp.printerManager && typeof thermalApp.printerManager.getPrinters === 'function'
+    ? (thermalApp.printerManager.getPrinters() || []).map((printer) => ({
+      name: printer.name || printer.id,
+      isDefault: printer.isDefault === true,
+      type: printer.type || null
+    }))
+    : [];
+  return {
+    impressorasEncontradas: printers,
+    impressorasManuais: settings.manualPrinters || [],
+    impressorasPorLoja: settings.storePrinters || {},
+    impressorasGlobais: settings.printers || {},
+    canal: settings.printChannel || 'local'
+  };
+}
+
+function getDiagnosticStatuses() {
+  const listener = thermalApp.pairedPrintListener;
+  if (!listener) return [];
+  if (typeof listener.getAllStatuses === 'function') return listener.getAllStatuses();
+  return typeof listener.getStatus === 'function' ? [listener.getStatus()] : [];
+}
+
+function buildDiagnosticFileName() {
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+  const store = getDiagnosticStatuses()
+    .map((status) => status && status.storeName)
+    .find(Boolean);
+  const safeStore = String(store || 'loja')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 40) || 'loja';
+  return `hub-impressao-logs-${safeStore}-${stamp}.txt`;
+}
+
+// Gera um arquivo .txt com versao, lojas pareadas, impressoras e o final dos
+// logs (tokens e chaves mascarados) para o lojista mandar ao suporte.
+ipcMain.handle('export-diagnostics', async () => {
+  const defaultDir = (() => {
+    try { return app.getPath('desktop'); } catch { return app.getPath('home'); }
+  })();
+  const targetWindow = thermalApp.mainWindow && !thermalApp.mainWindow.isDestroyed()
+    ? thermalApp.mainWindow
+    : undefined;
+  const { canceled, filePath } = await dialog.showSaveDialog(targetWindow, {
+    title: 'Salvar logs do Hub Impressão',
+    defaultPath: path.join(defaultDir, buildDiagnosticFileName()),
+    filters: [{ name: 'Texto', extensions: ['txt'] }]
+  });
+  if (canceled || !filePath) return { success: false, canceled: true };
+
+  const report = logger.buildDiagnosticReport({
+    appVersion: app.getVersion(),
+    statuses: getDiagnosticStatuses(),
+    settingsSummary: buildDiagnosticSettingsSummary()
+  });
+  await fs.promises.writeFile(filePath, report, 'utf8');
+  logger.info(`Diagnóstico exportado (${Math.round(Buffer.byteLength(report) / 1024)} KB).`);
+  shell.showItemInFolder(filePath);
+  return { success: true, filePath };
+});
+
+ipcMain.handle('get-app-version', async () => app.getVersion());
+
+ipcMain.handle('get-update-state', async () => (
+  thermalApp.updater ? thermalApp.updater.getState() : { status: 'disabled' }
+));
+
+ipcMain.handle('check-for-updates', async () => (
+  thermalApp.updater ? thermalApp.updater.checkNow() : { status: 'disabled' }
+));
+
+ipcMain.handle('install-update', async () => thermalApp.installUpdate());
+
+ipcMain.handle('open-logs-folder', async () => {
+  const error = await shell.openPath(logger.getLogDirectory());
+  return { success: !error, error: error || null };
 });
 
 ipcMain.handle('get-pairing-status', async () => {

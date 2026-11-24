@@ -31,14 +31,18 @@ const appJs = read('src/renderer/app.js');
 const preload = read('src/preload.js');
 const indexJs = read('src/main/index.js');
 const secureWs = read('src/main/websocket/secure-server.js');
-const expectedVersion = '1.9.2';
+// A versao vem do package.json; o lock precisa acompanhar e a tela le a versao
+// real do app (antes ficava fixa no HTML e mostrava 1.9.2 em todas as versoes).
+const expectedVersion = packageJson.version;
+const wsHandshakeVersion = '1.9.2';
 
-check('package version is 1.9.2', packageJson.version, expectedVersion);
-check('package-lock root version is 1.9.2', packageLock.version, expectedVersion);
-check('package-lock package version is 1.9.2', packageLock.packages[''].version, expectedVersion);
-check('renderer shows version 1.9.2', html.includes(`v${expectedVersion}`), true);
+check('package version is semver', /^\d+\.\d+\.\d+$/.test(packageJson.version), true);
+check('package-lock root version matches package', packageLock.version, expectedVersion);
+check('package-lock package version matches package', packageLock.packages[''].version, expectedVersion);
+check('renderer reads app version over IPC', appJs.includes('getAppVersion') && preload.includes("'get-app-version'") && indexJs.includes("ipcMain.handle('get-app-version'"), true);
+check('renderer has no hardcoded version label', /class="version">v\d/.test(html), false);
 check('renderer has no stale 1.7 UI version', html.includes('v1.7.0') || html.includes('v1.7.2'), false);
-check('WebSocket handshake version is 1.9.2', secureWs.includes(`version: '${expectedVersion}'`), true);
+check('WebSocket handshake version is unchanged', secureWs.includes(`version: '${wsHandshakeVersion}'`), true);
 check('UI uses Atendimento route wording', html.includes('Atendimento') || appJs.includes('Atendimento'), true);
 check('preload exposes pairing status', preload.includes('getPairingStatus'), true);
 check('preload exposes settings', preload.includes('getSettings'), true);

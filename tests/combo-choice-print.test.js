@@ -26,10 +26,10 @@ const order = {
 
 for (const route of ['kitchen', 'counter']) {
   test(`${route} prints every choice inside an AI combo exactly once`, () => {
-    const text = generateOrderPrintData(order, route, { paperWidth: 48, highlightBeverages: false }).join('');
-    for (const choice of ['2 Queijos / Calabresa', 'Chocolate com Morango', 'Guarana Antarctica 1 Litro']) {
-      assert.equal(text.split(choice).length - 1, 1, `${route}: ${choice}`);
+    const text = generateOrderPrintData(order, route, { paperWidth: 48, highlightBeverages: false }).join('').toUpperCase();
+    for (const choice of ['1/2 2 Queijos', '1/2 Calabresa', 'Chocolate com Morango', 'Guarana Antarctica 1 Litro']) {
+      assert.equal(text.split(choice.toUpperCase()).length - 1, 1, `${route}: ${choice}`);
     }
-    assert.match(text, /sem cebola/);
+    assert.match(text, /SEM CEBOLA/);
   });
 }

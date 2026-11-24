@@ -56,6 +56,10 @@ function patchPackageJson() {
   packageJson.devDependencies = packageJson.devDependencies || {};
   packageJson.dependencies = packageJson.dependencies || {};
   packageJson.devDependencies.electron = ELECTRON_WIN7_VERSION;
+  // O feed de atualizacao e do Hub principal (Electron 28, sem Win7): o build
+  // legado nao pode gerar app-update.yml apontando para ele.
+  packageJson.build = packageJson.build || {};
+  packageJson.build.publish = [];
   packageJson.dependencies['node-fetch'] = packageJson.dependencies['node-fetch'] || NODE_FETCH_VERSION;
 
   fs.writeFileSync(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`);

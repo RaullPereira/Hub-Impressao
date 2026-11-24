@@ -163,7 +163,9 @@ class Server {
           name,
           type: 'manual',
           isDefault: false
-        })).filter((printer) => !isWindows || discoveredNames.has(String(printer.name || '').trim().toLowerCase()));
+        })).filter((printer) => !isWindows
+          || /^tcp:/i.test(String(printer.name || '').trim())
+          || discoveredNames.has(String(printer.name || '').trim().toLowerCase()));
 
         res.json({ success: true, printers: enriched.concat(manual) });
       } catch (error) {
@@ -433,7 +435,18 @@ class Server {
 
     this.app.get('/api/settings', (req, res) => {
       try {
+        // A rota responde a qualquer site aberto no computador (CORS aberto):
+        // nunca devolver a sessao da loja nem a chave do Supabase.
         const settings = Settings.getAll();
+        const stripSecrets = (pairing) => {
+          if (!pairing || typeof pairing !== 'object') return pairing;
+          const { session, anonKey, ...safePairing } = pairing;
+          return { ...safePairing, hasSession: Boolean(session && session.access_token) };
+        };
+        settings.pairing = stripSecrets(settings.pairing);
+        settings.pairings = Object.fromEntries(
+          Object.entries(settings.pairings || {}).map(([id, pairing]) => [id, stripSecrets(pairing)])
+        );
         res.json({ success: true, settings });
       } catch (error) {
         logger.error('Erro ao obter configurações:', error);

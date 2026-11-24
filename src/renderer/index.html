@@ -29,7 +29,12 @@
         <div class="status-badge online">
           <span class="pulse"></span> Sistema Online
         </div>
-        <div class="version">v1.9.2</div>
+        <div class="version" id="app-version"></div>
+        <div class="update-notice" id="update-notice" hidden>
+          <div class="update-notice-text" id="update-notice-text"></div>
+          <button type="button" class="btn-primary update-notice-button" id="update-install" hidden>Atualizar agora</button>
+          <div class="update-notice-status" id="update-notice-status"></div>
+        </div>
         <div class="support-block">
           <div class="support-label">Suporte</div>
           <a href="https://wa.me/5585984582196" class="support-link" target="_blank" rel="noopener">WhatsApp 85 98458-2196</a>
@@ -163,10 +168,13 @@
               <option value="app">Aplicação</option>
               <option value="error">Erros</option>
             </select>
-            <button class="btn-primary" id="refresh-logs">Atualizar Logs</button>
+            <button class="btn-secondary" id="refresh-logs">Atualizar Logs</button>
+            <button class="btn-secondary" id="open-logs-folder" type="button">Abrir pasta</button>
+            <button class="btn-primary" id="export-diagnostics" type="button">Baixar logs</button>
           </div>
         </header>
         <div class="glass-panel full-height">
+          <div id="export-diagnostics-status" class="status-message"></div>
           <div id="logs-filepath" class="log-meta"></div>
           <div id="full-logs" class="log-terminal"></div>
         </div>

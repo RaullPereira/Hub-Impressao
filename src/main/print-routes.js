@@ -98,6 +98,50 @@ function buildLegacyAutoPrintRoutes(printSettings = {}) {
   }));
 }
 
+// Tipos de pedido que cada impressora imprime no automático (cadastro da impressora).
+const ORDER_TYPE_KEYS = ['mesa', 'balcao', 'delivery'];
+
+function orderTypeKey(order) {
+  const type = String(order?.order_type ?? order?.orderType ?? order?.delivery_type ?? order?.deliveryType ?? '')
+    .trim().toLowerCase();
+  if (['mesa', 'table', 'dine_in', 'salao'].includes(type)) return 'mesa';
+  if (type === 'delivery') return 'delivery';
+  return 'balcao';
+}
+
+function normalizeOrderTypes(value) {
+  if (!Array.isArray(value)) return null;
+  const types = value.map((entry) => String(entry || '').trim().toLowerCase()).filter((entry) => ORDER_TYPE_KEYS.includes(entry));
+  // Lista vazia ou com todos os tipos = imprime tudo (sem filtro).
+  return types.length > 0 && types.length < ORDER_TYPE_KEYS.length ? Array.from(new Set(types)) : null;
+}
+
+function normalizeRouteOrderTypes(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const result = {};
+  for (const route of ['kitchen', 'attendance', 'bar']) {
+    const types = normalizeOrderTypes(raw[route]);
+    if (types) result[route] = types;
+  }
+  return Object.keys(result).length > 0 ? result : null;
+}
+
+// Pedido de mesa lançado pelo garçom no app (espelho com hub_gestao_order_id): no
+// automático só sai a via de produção. A comanda completa vai para o caixa quando
+// o garçom pede o fechamento (mesma regra do web, isAppTableOrder).
+function isAppTableOrder(order) {
+  if (!order) return false;
+  const fromApp = Boolean(order.hub_gestao_order_id ?? order.hubGestaoOrderId);
+  return fromApp && orderTypeKey(order) === 'mesa';
+}
+
+function routeAcceptsOrder(normalizedMap, route, order) {
+  if (route === 'attendance' && isAppTableOrder(order)) return false;
+  const types = normalizedMap?.orderTypes?.[route];
+  if (!types || !order) return true;
+  return types.includes(orderTypeKey(order));
+}
+
 function normalizeAutoPrintMap(rawAutoPrint) {
   if (!rawAutoPrint || typeof rawAutoPrint !== 'object' || Array.isArray(rawAutoPrint)) {
     return null;
@@ -118,12 +162,14 @@ function normalizeAutoPrintMap(rawAutoPrint) {
     return null;
   }
 
+  const orderTypes = normalizeRouteOrderTypes(rawAutoPrint.orderTypes);
   return {
     kitchen,
     attendance,
     counter: attendance,
     delivery: attendance,
-    bar
+    bar,
+    ...(orderTypes ? { orderTypes } : {})
   };
 }
 
@@ -139,7 +185,7 @@ function getAutoPrintPrinterForRoute(autoPrintMap, route) {
   return null;
 }
 
-function buildAutoPrintRoutesForOrder(autoPrintMap, _order = null, options = {}) {
+function buildAutoPrintRoutesForOrder(autoPrintMap, order = null, options = {}) {
   const normalizedMap = normalizeAutoPrintMap(autoPrintMap);
   if (!normalizedMap) return [];
   const selectedRoutes = Array.isArray(options.autoPrintRoutes) || typeof options.autoPrintRoutes === 'string'
@@ -148,7 +194,9 @@ function buildAutoPrintRoutesForOrder(autoPrintMap, _order = null, options = {})
       barPrintEnabled: options.barPrintEnabled === true
     }))
     : null;
-  const routeEnabled = (route) => !selectedRoutes || selectedRoutes.has(route);
+  const routeOn = (route) => !selectedRoutes || selectedRoutes.has(route);
+  const mapRoute = (route) => (route === 'counter' ? 'attendance' : route);
+  const routeEnabled = (route) => routeOn(route) && routeAcceptsOrder(normalizedMap, mapRoute(route), order);
 
   const routes = [];
   if (routeEnabled('kitchen') && normalizedMap.kitchen) {
@@ -179,6 +227,8 @@ function buildAutoPrintRoutesForOrder(autoPrintMap, _order = null, options = {})
 }
 
 module.exports = {
+  orderTypeKey,
+  isAppTableOrder,
   buildLegacyAutoPrintRoutes,
   buildAutoPrintRoutesForOrder,
   getAutoPrintPrinterForRoute,

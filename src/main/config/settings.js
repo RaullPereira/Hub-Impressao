@@ -154,7 +154,8 @@ function createDefaultSettings() {
     printChannel: 'local',
     qzEndpoint: null,
     pairings: {},
-    pairing: normalizePairing({ enabled: false })
+    pairing: normalizePairing({ enabled: false }),
+    stationId: null
   };
 }
 
@@ -191,17 +192,38 @@ function normalizeSettings(rawSettings = {}) {
       ? rawSettings.qzEndpoint.trim()
       : null,
     pairings,
-    pairing: getLegacyPairingSnapshot(pairings)
+    pairing: getLegacyPairingSnapshot(pairings),
+    // Id fixo deste Hub, usado pelo "computador da impressao automatica".
+    stationId: typeof rawSettings.stationId === 'string' && /^hub:[A-Za-z0-9-]{8,}$/.test(rawSettings.stationId.trim())
+      ? rawSettings.stationId.trim()
+      : null
   };
+}
+
+// So este processo grava o settings.json. Antes, cada consulta (heartbeat de
+// 15s, resolucao de impressora, sessao do Supabase) lia e parseava o arquivo do
+// disco, e cada heartbeat regravava o arquivo inteiro. O cache guarda a ultima
+// versao gravada; quem chama recebe uma copia e pode altera-la livremente.
+let settingsCache = null;
+let settingsCacheJson = null;
+
+function cloneSettings(value) {
+  return typeof structuredClone === 'function'
+    ? structuredClone(value)
+    : JSON.parse(JSON.stringify(value));
 }
 
 class Settings {
   static getAll() {
+    if (settingsCache) {
+      return cloneSettings(settingsCache);
+    }
+
     try {
       if (!fs.existsSync(SETTINGS_FILE)) {
         const defaults = normalizeSettings();
         this.save(defaults);
-        return defaults;
+        return cloneSettings(defaults);
       }
 
       const data = fs.readFileSync(SETTINGS_FILE, 'utf-8');
@@ -210,9 +232,12 @@ class Settings {
 
       if (JSON.stringify(parsed) !== JSON.stringify(normalized)) {
         this.save(normalized);
+      } else {
+        settingsCache = normalized;
+        settingsCacheJson = JSON.stringify(normalized, null, 2);
       }
 
-      return normalized;
+      return cloneSettings(normalized);
     } catch (e) {
       logger.error('Erro ao ler configurações:', e);
       return normalizeSettings();
@@ -227,13 +252,28 @@ class Settings {
       }
 
       const normalized = normalizeSettings(newSettings);
-      fs.writeFileSync(SETTINGS_FILE, JSON.stringify(normalized, null, 2));
-      logger.info('Configurações salvas');
+      const json = JSON.stringify(normalized, null, 2);
+      if (settingsCache && json === settingsCacheJson) {
+        return true;
+      }
+      fs.writeFileSync(SETTINGS_FILE, json);
+      settingsCache = normalized;
+      settingsCacheJson = json;
       return true;
     } catch (e) {
       logger.error('Erro ao salvar configurações:', e);
       return false;
     }
+  }
+
+  // Id fixo deste Hub (gerado uma vez e salvo no settings.json).
+  static getStationId() {
+    const settings = this.getAll();
+    if (settings.stationId) return settings.stationId;
+    const crypto = require('crypto');
+    settings.stationId = `hub:${crypto.randomUUID()}`;
+    this.save(settings);
+    return settings.stationId;
   }
 
   static getPrinterForType(type) {
@@ -404,5 +444,11 @@ class Settings {
     return this.save(settings);
   }
 }
+
+// Testes: descarta o cache para reler o arquivo.
+Settings.resetCacheForTests = () => {
+  settingsCache = null;
+  settingsCacheJson = null;
+};
 
 module.exports = Settings;

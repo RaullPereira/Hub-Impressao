@@ -1,7 +1,8 @@
 const { performance } = require('node:perf_hooks');
 
 const STAGES = ['pickup', 'claim', 'render', 'queueWait', 'spool'];
-const OUTCOMES = new Set(['printed', 'skipped', 'failed']);
+// empty = via sem itens de producao (nada a imprimir).
+const OUTCOMES = new Set(['printed', 'skipped', 'failed', 'empty']);
 const UPDATED_AT_SOURCES = new Set([
   'realtime_update_accepted',
   'realtime_update_paid',
@@ -79,6 +80,8 @@ function buildPrintPerformanceRecord(base = {}, timings = {}) {
   if (base.storeId != null && toText(base.storeId)) {
     record.storeId = toText(base.storeId);
   }
+  // Layout da comanda de reserva local ('web' | 'legado' | 'vazio'), quando houve.
+  const layout = base.layout ? toText(base.layout) : '';
   return {
     traceId: record.traceId,
     ...(record.storeId ? { storeId: record.storeId } : {}),
@@ -93,7 +96,8 @@ function buildPrintPerformanceRecord(base = {}, timings = {}) {
     queueWaitMs: record.queueWaitMs,
     spoolMs: record.spoolMs,
     totalMs: record.totalMs,
-    slowestStage: record.slowestStage
+    slowestStage: record.slowestStage,
+    ...(layout ? { layout } : {})
   };
 }
 

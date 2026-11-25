@@ -81,7 +81,7 @@ for (const paperWidth of [32, 48]) {
 
 test('mesa do garcom: mesa em letra gigante e adicional uma vez so', () => {
   const kitchen = hub.generateOrderPrintData(orders.mesa, 'kitchen', settingsFor({ paper_width: 48 })).join('');
-  assert.ok(/\x1D!\x11[^\n]*MESA 7\n/.test(kitchen), 'MESA 7 em letra gigante');
+  assert.ok(/\x1D!\x11[^\n]*MESA 7[^\n]*\n/.test(kitchen), 'MESA 7 em letra gigante');
   assert.strictEqual((kitchen.match(/\+ 1X OVO/g) || []).length, 1);
   assert.ok(!kitchen.includes('CLIENTE:'), 'sem linha de cliente vazia');
 });

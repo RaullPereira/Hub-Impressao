@@ -5,8 +5,9 @@ const CMD = {
   FONT_A: '\x1BM\x00',
   FONT_B: '\x1BM\x01',
   TXT_NORMAL: '\x1D\x21\x00',
-  TXT_DOUBLE_H: '\x1D\x21\x10',
-  TXT_DOUBLE_W: '\x1D\x21\x20',
+  // GS ! n: bit 0 = altura dupla, bit 4 = largura dupla (igual ao printer.ts do web).
+  TXT_DOUBLE_H: '\x1D\x21\x01',
+  TXT_DOUBLE_W: '\x1D\x21\x10',
   TXT_BIG: '\x1D\x21\x11',
   ALIGN_LEFT: '\x1Ba\x00',
   ALIGN_CENTER: '\x1Ba\x01',
@@ -293,6 +294,18 @@ function generateKitchenPrintData(order, printSettings) {
   });
 
   const printKitchenItem = (item) => {
+    const blockStart = data.length;
+    printKitchenItemBody(item);
+    // Bloco do item (produto, sabores, borda, escolhas) igual as bebidas:
+    // letra alta e negrito, para a cozinha ler de longe.
+    for (let i = blockStart; i < data.length - 1; i++) {
+      if (data[i] === CMD.medium_OFF) data[i] = CMD.medium_ON;
+    }
+    data.splice(blockStart, 0, CMD.TXT_DOUBLE_H, CMD.medium_ON);
+    data.splice(data.length - 1, 0, CMD.medium_OFF, CMD.TXT_NORMAL);
+  };
+
+  const printKitchenItemBody = (item) => {
     const quantity = item.quantity || 1;
     let name = normalizeText(item.product_name || item.productName || item.name || 'Item');
     const flavors = Array.isArray(item.flavors) && item.flavors.length > 0
@@ -798,8 +811,11 @@ function generateCounterPrintData(order, printSettings) {
     data.push(CMD.medium_OFF);
   };
 
+  // Sabores e escolhas no mesmo negrito de "BEBIDA NO DESTAQUE".
   const pushItemDetail = (text, indent = '   ') => {
+    data.push(CMD.medium_ON);
     data.push(`${indent}${text}\n`);
+    data.push(CMD.medium_OFF);
   };
 
   const pushLabeledDetail = (label, value, indent = '   ') => {
@@ -1290,25 +1306,17 @@ function generateCounterPrintData(order, printSettings) {
     const beverageItems = (order.items || []).filter((item) => isBeverageCategory(resolveItemCategory(item)));
 
     if (beverageItems.length > 0) {
-      if (!isCompactCounterLayout) data.push(separatorFine);
-      // Sem fundo invertido: nas termicas 58mm o preto corrido sai fraco e a
-      // letra dupla passava das colunas. Faixa de '=' e letra grande em negrito.
+      // O item anterior ja fecha com separador e o SUBTOTAL abre com outro:
+      // aqui nada de linhas extras nem linhas em branco. Titulo e "LEVAR
+      // BEBIDAS" centralizados e no mesmo tamanho.
+      const titleSize = bigSizeFor('ATENCAO MOTOBOY', cols);
       data.push(CMD.ALIGN_CENTER);
-      data.push('='.repeat(cols) + '\n');
-      data.push(bigSizeFor('ATENCAO MOTOBOY', cols));
+      data.push(titleSize);
       data.push(CMD.medium_ON);
       data.push('ATENCAO MOTOBOY\n');
-      data.push(CMD.medium_OFF);
-      data.push(CMD.TXT_NORMAL);
-      data.push('='.repeat(cols) + '\n');
-      emptyLine();
-      data.push(CMD.ALIGN_LEFT);
-      data.push(CMD.TXT_BIG);
-      data.push(CMD.medium_ON);
       data.push('LEVAR BEBIDAS:\n');
       data.push(CMD.medium_OFF);
       data.push(CMD.TXT_NORMAL);
-      emptyLine();
 
       beverageItems.forEach((item) => {
         const quantity = item.quantity || 1;
@@ -1318,12 +1326,11 @@ function generateCounterPrintData(order, printSettings) {
         const sizeText = size ? ` (${normalizeText(size)})` : '';
         data.push(CMD.TXT_DOUBLE_H);
         data.push(CMD.medium_ON);
-        data.push(`  ${quantity}x ${name}${sizeText}\n`);
+        data.push(`${quantity}x ${name}${sizeText}\n`);
         data.push(CMD.medium_OFF);
         data.push(CMD.TXT_NORMAL);
       });
-
-      if (!isCompactCounterLayout) data.push(separatorFine);
+      data.push(CMD.ALIGN_LEFT);
     }
   }
 
@@ -1513,6 +1520,21 @@ function generateCounterPrintData(order, printSettings) {
 // A comanda de reserva do Hub sai igual a do web; o layout antigo deste
 // arquivo so entra se o pacote faltar ou der erro (o papel nao pode deixar de sair).
 let webFormatter;
+// Log sem dependencia fixa (o simulador e os testes rodam fora do Electron):
+// o listener troca pelo logger do Hub com setFormatterLogger.
+let formatterLog = (message) => console.warn(message);
+function setFormatterLogger(fn) {
+  formatterLog = typeof fn === 'function' ? fn : (message) => console.warn(message);
+}
+// Qual layout saiu na ultima chamada de generateOrderPrintData:
+// 'web' | 'legado' | 'vazio' (null para comanda pronta em _customPrintData).
+let lastLayout = null;
+function getLastLayout() {
+  return lastLayout;
+}
+function isProductionPrintType(printType) {
+  return printType === 'kitchen' || printType === 'bar';
+}
 function loadWebFormatter() {
   if (webFormatter !== undefined) return webFormatter;
   try {
@@ -1525,7 +1547,10 @@ function loadWebFormatter() {
 
 function generateWithWebFormatter(order, printType, printSettings) {
   const web = loadWebFormatter();
-  if (!web) return null;
+  if (!web) {
+    formatterLog(`[Formatter] pacote do layout do web ausente; usando formato antigo (via ${printType}).`);
+    return null;
+  }
 
   const previousStorage = globalThis.localStorage;
   try {
@@ -1542,8 +1567,14 @@ function generateWithWebFormatter(order, printType, printSettings) {
     };
     web.setPrintSettingsCache(settings);
     const commands = web.generateOrderPrintData(web.normalizeOrderForPrint(order, {}), printType, settings);
-    return Array.isArray(commands) && commands.join('') ? commands : null;
-  } catch (_) {
+    if (!Array.isArray(commands)) return null;
+    // Cozinha/bar sem itens daquela via: vazio legitimo, nao cai no formato antigo.
+    if (!commands.join('') && !isProductionPrintType(printType)) return null;
+    return commands;
+  } catch (error) {
+    formatterLog(
+      `[Formatter] layout do web falhou; usando formato antigo (via ${printType}, pedido #${order?.order_number || order?.orderNumber || order?.id || '?'}): ${error?.message || error}`
+    );
     return null;
   } finally {
     if (previousStorage === undefined) delete globalThis.localStorage;
@@ -1552,17 +1583,52 @@ function generateWithWebFormatter(order, printType, printSettings) {
 }
 
 function generateOrderPrintData(order, printType = 'counter', printSettings) {
+  lastLayout = null;
   if (order?._customPrintData && Array.isArray(order._customPrintData)) {
     return order._customPrintData;
   }
 
   const official = generateWithWebFormatter(order, printType, printSettings);
-  if (official) return official;
+  if (official !== null) {
+    lastLayout = official.join('') ? 'web' : 'vazio';
+    return official;
+  }
 
-  return generateLegacyOrderPrintData(order, printType, printSettings);
+  const legacy = generateLegacyOrderPrintData(order, printType, printSettings);
+  lastLayout = legacy.join('') ? 'legado' : 'vazio';
+  return legacy;
 }
 
+// Recuo de 1 coluna de cada lado no 80mm (igual ao layout do web): sem ele o
+// texto encostava na borda esquerda e algumas impressoras cortavam a 1a letra.
 function generateLegacyOrderPrintData(order, printType = 'counter', printSettings) {
+  const base = getNormalizedSettings(printSettings);
+  if ((base.paperWidth || 48) <= 32 || base.marginLeft || base.marginRight) {
+    return generateLegacyOrderPrintDataRaw(order, printType, printSettings);
+  }
+  const data = generateLegacyOrderPrintDataRaw(order, printType, Object.assign({}, base, { marginLeft: 1, marginRight: 1 }));
+  let alignLeft = true;
+  let atLineStart = true;
+  return data.map((chunk) => {
+    if (typeof chunk !== 'string') return chunk;
+    if (chunk.includes(CMD.ESC) || chunk.includes(CMD.GS)) {
+      const l = chunk.lastIndexOf(CMD.ALIGN_LEFT);
+      const c = Math.max(chunk.lastIndexOf(CMD.ALIGN_CENTER), chunk.lastIndexOf(CMD.ALIGN_RIGHT));
+      if (l >= 0 || c >= 0) alignLeft = l > c;
+      return chunk;
+    }
+    return chunk.split('\n').map((part, index, parts) => {
+      const startsLine = index > 0 || atLineStart;
+      if (index === parts.length - 1) atLineStart = part === '' ? (index > 0 || atLineStart) : false;
+      return startsLine && alignLeft && part ? ` ${part}` : part;
+    }).join('\n');
+  });
+}
+
+function generateLegacyOrderPrintDataRaw(order, printType = 'counter', printSettings) {
+
+  // O formato antigo nao tem via de bar: nunca imprime uma via completa no bar.
+  if (printType === 'bar') return [];
 
   if (printType === 'kitchen') {
     return generateKitchenPrintData(order, printSettings);
@@ -1584,5 +1650,7 @@ module.exports = {
   getNormalizedSettings,
   generateOrderPrintData,
   generateLegacyOrderPrintData,
-  normalizeText
+  getLastLayout,
+  normalizeText,
+  setFormatterLogger
 };

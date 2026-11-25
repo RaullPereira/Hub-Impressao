@@ -194,6 +194,11 @@ class CUPSPrinterManager {
     }
     
     logger.info(`[PRINT] Buffer criado: ${escposBuffer.length} bytes`);
+    // Via sem nada a imprimir (ex.: bar sem bebida): sucesso sem mandar papel.
+    if (escposBuffer.length === 0) {
+      logger.info('[PRINT] Buffer vazio: nada a imprimir.');
+      return;
+    }
 
     const tmpFile = '/tmp/thermal-order.prn';
     fs.writeFileSync(tmpFile, escposBuffer);

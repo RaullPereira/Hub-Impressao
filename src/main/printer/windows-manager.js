@@ -245,6 +245,11 @@ class WindowsPrinterManager {
       } else {
         throw new Error('Nenhum conteúdo para imprimir fornecido');
       }
+      // Via sem nada a imprimir (ex.: bar sem bebida): sucesso sem mandar papel.
+      if (buf.length === 0) {
+        logger.info('[print] Buffer vazio: nada a imprimir.');
+        return { success: true, mode: 'empty' };
+      }
       return await this._printBuffer(selectedPrinter, buf, {
         preserveRaw: Boolean(rawContent)
       });

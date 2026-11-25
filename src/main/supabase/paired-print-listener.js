@@ -5,6 +5,7 @@ const { performance } = require('node:perf_hooks');
 const BaseWebSocketTransport = require('ws');
 const pedidosHubFormatter = require('../printer/pedidoshub-formatter');
 const { DEFAULT_PRINT_SETTINGS } = pedidosHubFormatter;
+pedidosHubFormatter.setFormatterLogger((message) => logger.warn(message));
 const PrinterDispatchQueue = require('../printer/printer-dispatch-queue');
 const fetchCompat = require('../utils/fetch');
 const {
@@ -272,6 +273,28 @@ function getBearerAuthorization(session) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Prazo para resolver o nome da forma de pagamento na comanda de reserva:
+// a rede lenta nao pode segurar o papel.
+const FALLBACK_PREPARE_TIMEOUT_MS = 1500;
+
+// Cozinha/bar sem itens daquela via: o render devolve rawContent vazio. Nao e
+// erro (nada a imprimir), e nao pode cair no layout antigo nem derrubar as
+// outras vias do pedido.
+function isEmptyProductionVariant(candidate, printType) {
+  if (printType !== 'kitchen' && printType !== 'bar') return false;
+  if (!candidate || typeof candidate !== 'object' || typeof candidate.rawContent !== 'string') return false;
+  const raw = candidate.rawContent.trim();
+  if (!raw) return true;
+  const encoding = typeof candidate.encoding === 'string' && candidate.encoding.trim() ? candidate.encoding.trim() : 'base64';
+  return encoding === 'base64' && Buffer.from(raw, 'base64').length === 0;
+}
+
+// Codigo cru da forma de pagamento (UUID ou "custom_...") que nao resolveu em nome.
+function looksLikePaymentMethodCode(value) {
+  const text = String(value || '').trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text) || /^custom_/i.test(text);
 }
 
 function parseArrayLike(value) {
@@ -580,7 +603,8 @@ class PairedPrintListener {
         via: details.via,
         printer: details.printer,
         source: context.source,
-        outcome: details.outcome
+        outcome: details.outcome,
+        layout: details.layout
       }, {
         pickupMs: context.pickupMs,
         claimMs: details.claimMs,
@@ -1209,6 +1233,9 @@ class PairedPrintListener {
       }
 
       await this.refreshPrintSettings();
+      // Aquece o cache das formas de pagamento: a comanda de reserva usa o nome
+      // mesmo quando a rede cai depois.
+      void this.getPaymentMethods().catch(() => null);
       await this.subscribeChannels(connectionAttemptId);
 
       this.status = 'active';
@@ -2056,7 +2083,7 @@ class PairedPrintListener {
     try {
       return await this.fetchRenderedPayload(orderId, printType);
     } catch (error) {
-      const fallback = this.buildLocalFallbackPayload(error, orderData, printType, orderId);
+      const fallback = await this.buildLocalFallbackPayload(error, orderData, printType, orderId);
       if (fallback) return fallback;
       throw error;
     }
@@ -2067,7 +2094,7 @@ class PairedPrintListener {
   // quebrado no /api/print/render deixou todas as lojas sem comanda. Erro 4xx
   // (pedido inexistente, sem permissao) continua falhando: ali o problema nao
   // e disponibilidade e imprimir poderia sair errado.
-  buildLocalFallbackPayload(error, orderData, printType, orderId = null) {
+  async buildLocalFallbackPayload(error, orderData, printType, orderId = null) {
     const status = Number(error?.status);
     if (Number.isFinite(status) && status >= 400 && status < 500) return null;
     if (!orderData || typeof orderData !== 'object') return null;
@@ -2078,22 +2105,47 @@ class PairedPrintListener {
     }
     if (!Array.isArray(items) || items.length === 0) return null;
 
+    const orderLabel = orderData.order_number || orderId || orderData.id;
+    if (error?.renderTimeout) {
+      logger.warn(`${this.getLogContext()} Pedido #${orderLabel}: render oficial passou de ${this.renderTimeoutMs / 1000} s. Usando layout local do Hub.`);
+    } else {
+      logger.warn(`${this.getLogContext()} Pedido #${orderLabel}: render oficial falhou: ${error?.message || error}. Usando layout local do Hub.`);
+    }
+
+    // Nome da forma de pagamento (o pedido guarda o id), com prazo curto.
+    let timer = null;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), FALLBACK_PREPARE_TIMEOUT_MS);
+    });
+    let prepared = null;
+    try {
+      prepared = await Promise.race([this.prepareOrderForPrinting(orderData), timeout]).catch(() => null);
+    } finally {
+      clearTimeout(timer);
+    }
+    const printable = { ...(prepared || orderData), items };
+    if (looksLikePaymentMethodCode(printable.payment_method)) {
+      printable.payment_method = 'A combinar';
+    }
+
     try {
       const commands = pedidosHubFormatter.generateOrderPrintData(
-        { ...orderData, items },
+        printable,
         printType,
         this.printSettings
       );
+      const layout = pedidosHubFormatter.getLastLayout();
       const commandString = Array.isArray(commands) ? commands.join('') : String(commands || '');
-      if (!commandString) return null;
-      logger.warn(
-        `${this.getLogContext()} Render oficial indisponivel para pedido #${orderData.order_number || orderId || orderData.id} (${error?.message || error}). Usando layout local do Hub.`
-      );
+      if (!commandString) {
+        if (printType !== 'kitchen' && printType !== 'bar') return null;
+        return { skip: true, printType, localFallback: true, layout };
+      }
       return {
         rawContent: Buffer.from(commandString, 'binary').toString('base64'),
         encoding: 'base64',
         printType,
-        localFallback: true
+        localFallback: true,
+        layout
       };
     } catch (formatError) {
       logger.warn(`${this.getLogContext()} Layout local do Hub falhou:`, formatError?.message || formatError);
@@ -2107,6 +2159,9 @@ class PairedPrintListener {
       orderId,
       printType
     });
+    if (isEmptyProductionVariant(payload, printType)) {
+      return { skip: true, printType };
+    }
     const normalized = this.normalizeRenderedPayload(payload, printType);
     if (!normalized) {
       throw new Error(`PedidosHub retornou um payload de impressão inválido para ${printType}`);
@@ -2156,7 +2211,10 @@ class PairedPrintListener {
         return { response, raw };
       } catch (error) {
         if (controller.signal.aborted || error?.name === 'AbortError') {
-          throw new Error(`Timeout ao renderizar impressão no PedidosHub após ${this.renderTimeoutMs}ms`);
+          throw Object.assign(
+            new Error(`Timeout ao renderizar impressão no PedidosHub após ${this.renderTimeoutMs}ms`),
+            { renderTimeout: true }
+          );
         }
         throw error;
       } finally {
@@ -2209,10 +2267,12 @@ class PairedPrintListener {
       return await this.fetchOfficialRenderedPayloads(orderId, uniqueTypes);
     } catch (error) {
       if (!orderData) throw error;
-      const fallbackEntries = uniqueTypes.map((printType) => [
+      // Vias oficiais que vieram ficam; a reserva local entra so nas que faltaram.
+      const kept = error && typeof error === 'object' && error.partialPayloads ? error.partialPayloads : {};
+      const fallbackEntries = await Promise.all(uniqueTypes.map(async (printType) => [
         printType,
-        this.buildLocalFallbackPayload(error, orderData, printType, orderId)
-      ]);
+        kept[printType] || await this.buildLocalFallbackPayload(error, orderData, printType, orderId)
+      ]));
       if (fallbackEntries.every(([, candidate]) => candidate)) {
         return Object.fromEntries(fallbackEntries);
       }
@@ -2227,30 +2287,44 @@ class PairedPrintListener {
       printTypes: uniqueTypes
     });
     const variants = payload?.variants;
+    const resolved = {};
 
     if (variants && typeof variants === 'object' && !Array.isArray(variants)) {
-      const normalizedEntries = uniqueTypes.map((printType) => [
-        printType,
-        this.normalizeRenderedPayload(variants[printType], printType)
-      ]);
-
-      if (normalizedEntries.every(([, candidate]) => candidate)) {
-        return Object.fromEntries(normalizedEntries);
-      }
+      uniqueTypes.forEach((printType) => {
+        const candidate = variants[printType];
+        if (isEmptyProductionVariant(candidate, printType)) {
+          resolved[printType] = { skip: true, printType };
+          return;
+        }
+        const normalized = this.normalizeRenderedPayload(candidate, printType);
+        if (normalized) resolved[printType] = normalized;
+      });
     }
 
-    const legacyEntries = await Promise.all(uniqueTypes.map(async (printType) => [
-      printType,
-      await this.fetchRenderedPayload(orderId, printType)
-    ]));
-    return Object.fromEntries(legacyEntries);
+    // Refaz o render so das vias que vieram invalidas (servidor antigo: todas).
+    const missing = uniqueTypes.filter((printType) => !resolved[printType]);
+    if (missing.length === 0) return resolved;
+
+    const results = await Promise.allSettled(missing.map((printType) => this.fetchRenderedPayload(orderId, printType)));
+    let firstError = null;
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') resolved[missing[index]] = result.value;
+      else if (!firstError) firstError = result.reason;
+    });
+    if (!firstError) {
+      return Object.fromEntries(uniqueTypes.map((printType) => [printType, resolved[printType]]));
+    }
+    if (firstError && typeof firstError === 'object') {
+      firstError.partialPayloads = { ...resolved };
+    }
+    throw firstError;
   }
 
   getJobPayload(job, requestedType) {
     const content = job && typeof job.content === 'object' ? job.content : null;
     if (!content) return null;
 
-    const requestedKey = requestedType === 'kitchen' || requestedType === 'both'
+    const requestedKey = ['kitchen', 'both', 'bar'].includes(requestedType)
       ? requestedType
       : 'counter';
 
@@ -2258,7 +2332,12 @@ class PairedPrintListener {
       ? content.variants[requestedKey] || null
       : null;
 
+    // Bar nunca usa o conteudo de outra via (era uma 2a via completa no caixa).
+    if (requestedKey === 'bar' && !variant && content.printType !== 'bar') return null;
     const candidate = variant && typeof variant === 'object' ? variant : content;
+    if (isEmptyProductionVariant(candidate, requestedKey)) {
+      return { skip: true, printType: requestedKey };
+    }
     if (typeof candidate.rawContent !== 'string' || !candidate.rawContent.trim()) {
       return null;
     }
@@ -2439,6 +2518,8 @@ class PairedPrintListener {
   }
 
   async printRawPayload(printerId, payload, printType) {
+    // Via sem itens de producao: nada vai para a impressora.
+    if (payload?.skip) return 'empty';
     if (!this.printerManager || typeof this.printerManager.print !== 'function') {
       throw new Error('PrinterManager indisponível no serviço local');
     }
@@ -2452,8 +2533,9 @@ class PairedPrintListener {
     });
   }
 
+  // Retorna 'printed', 'empty' (via sem itens) ou 'skipped' (bar sem impressora).
   async printWithRouting(orderId, requestedType, job = null, orderData = null) {
-    const printType = requestedType === 'kitchen' || requestedType === 'both' ? requestedType : 'counter';
+    const printType = ['kitchen', 'both', 'bar'].includes(requestedType) ? requestedType : 'counter';
     await this.refreshPrintersIfNeeded();
 
     if (printType === 'both') {
@@ -2519,19 +2601,31 @@ class PairedPrintListener {
       if (firstFailure) {
         throw firstFailure.reason;
       }
-      return;
+      return 'printed';
     }
 
-    const printerId = await this.resolveAvailablePrinterId(printType);
+    // Bar: so a impressora de bar de verdade (sem cair na padrao, que e o caixa).
+    const printerId = printType === 'bar'
+      ? await this.resolveGestaoRoutePrinter('bar')
+      : await this.resolveAvailablePrinterId(printType);
     if (!printerId) {
+      if (printType === 'bar') {
+        logger.info(`${this.getLogContext()} Pedido ${orderId}: via bar sem impressora de bar configurada. Via pulada.`);
+        return 'skipped';
+      }
       throw new Error(`Nenhuma impressora configurada para o tipo ${printType}`);
     }
 
     const payload = await this.resolvePrintPayload(orderId, printType, job, orderData);
+    if (payload?.skip) {
+      logger.info(`${this.getLogContext()} Pedido ${orderId}: via ${printType} sem itens de producao, nada a imprimir.`);
+      return 'empty';
+    }
     await this.dispatchQueue.enqueue(
       printerId,
       () => this.printRawPayload(printerId, payload, printType)
     );
+    return 'printed';
   }
 
   // true = continuar tentando (reserva pode ser solta); false = desistir.
@@ -2716,14 +2810,16 @@ class PairedPrintListener {
         const legacyPrintStartedAt = this.getPrintPerformanceNow();
         let spoolMs = 0;
         try {
-          await this.runPrintActionWithRetry(
+          const routeOutcome = await this.runPrintActionWithRetry(
             () => this.printWithRouting(orderId, route.printType, null, order),
             `auto print ${route.ledgerType} do pedido #${order.order_number || orderId}`
           );
           spoolMs = this.getPrintPerformanceElapsed(legacyPrintStartedAt);
+          // Via vazia ou bar sem impressora: o claim fica (a recuperacao nao
+          // reprocessa) e a via conta como resolvida.
           this.emitAutoPrintTelemetry(telemetryContext, {
             via: route.ledgerType,
-            outcome: 'printed',
+            outcome: routeOutcome === 'empty' || routeOutcome === 'skipped' ? routeOutcome : 'printed',
             claimMs,
             spoolMs
           });
@@ -2949,12 +3045,30 @@ class PairedPrintListener {
             return 'skipped';
           }
 
+          const viaPayload = payloads[via.printType];
+          if (viaPayload?.skip) {
+            // Via sem itens de producao: nada a imprimir. O claim fica para a
+            // recuperacao nao reprocessar.
+            taskState.telemetryEmitted = true;
+            this.emitAutoPrintTelemetry(activeTelemetry, {
+              via: via.ledgerType,
+              printer: via.printerId,
+              outcome: 'empty',
+              layout: viaPayload.layout,
+              ...timings
+            });
+            logger.info(
+              `${this.getLogContext()} Pedido #${order.order_number || orderId}: via ${via.ledgerType} sem itens de producao, nada a imprimir.`
+            );
+            return 'empty';
+          }
+
           const retryStartedAt = this.getPrintPerformanceNow();
           try {
             await this.runPrintActionWithRetry(
               () => this.printRawPayload(
                 via.printerId,
-                payloads[via.printType],
+                viaPayload,
                 via.printType
               ),
               `auto print (${via.ledgerType}) do pedido #${order.order_number || orderId}`
@@ -2965,6 +3079,7 @@ class PairedPrintListener {
               via: via.ledgerType,
               printer: via.printerId,
               outcome: 'printed',
+              layout: viaPayload?.layout,
               ...timings
             });
             return 'printed';

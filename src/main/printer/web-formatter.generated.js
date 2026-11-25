@@ -36065,7 +36065,7 @@ function centeredRasterCommand(bitmap, bytesPerRow, height, paperDots = 0) {
   }
   return "v0\0" + String.fromCharCode(rowBytes & 255, rowBytes >> 8, height & 255, height >> 8) + Array.from(rows, (byte) => String.fromCharCode(byte)).join("");
 }
-function deliveryCode128Raster(code, paperDots = 0) {
+function deliveryCode128Raster(code, paperDots = 0, contentDots = 0) {
   if (!/^\d{10}$/.test(code)) return "";
   const patterns = import_library.Code128Reader.CODE_PATTERNS;
   if (!patterns || patterns.length < 107) return "";
@@ -36080,6 +36080,21 @@ function deliveryCode128Raster(code, paperDots = 0) {
     });
   }
   modules.push(...Array(10).fill(false));
+  if (contentDots > 0) {
+    const bars = modules.slice(10, -10);
+    const canvas = Math.floor((paperDots || contentDots) / 8) * 8;
+    const width = Math.min(contentDots, canvas);
+    const left = Math.floor((canvas - width) / 2);
+    if (width >= bars.length * 2) {
+      const scale2 = Math.floor(width / bars.length);
+      const used = bars.length * scale2;
+      if (scale2 >= 2 && width - used <= 12) {
+        const start = left + Math.floor((width - used) / 2);
+        return rasterCommand(canvas, 64, (x) => x >= start && x < start + used && (bars[Math.floor((x - start) / scale2)] || false));
+      }
+      return rasterCommand(canvas, 64, (x) => x >= left && x < left + width && (bars[Math.floor((x - left) * bars.length / width)] || false));
+    }
+  }
   const scale = paperDots >= 500 ? 3 : 2;
   return rasterCommand(
     Math.ceil(modules.length * scale / 8) * 8,
@@ -36114,6 +36129,491 @@ function normalizeAutoPrintStation(raw) {
     label,
     setAt: cleanId(source.setAt ?? source.set_at)
   };
+}
+
+// ../Sistemadegerenciamentodepedidos/src/utils/product-label-print.ts
+var DEFAULT_PRODUCT_LABEL_SETTINGS = {
+  widthMm: 100,
+  heightMm: 50,
+  gapMm: 3,
+  density: 8,
+  speed: 4,
+  copies: 1,
+  fields: ["productName", "price", "sku", "expiresAt"],
+  rotation: 0
+};
+var DEFAULT_FIELD_ORDER = [
+  "storeName",
+  "productName",
+  "price",
+  "sku",
+  "barcode",
+  "batch",
+  "producedAt",
+  "expiresAt",
+  "observation"
+];
+function normalizeProductLabelSettings(settings) {
+  let source = {};
+  if (typeof settings === "string") {
+    try {
+      const parsed = JSON.parse(settings);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        source = parsed;
+      }
+    } catch {
+      source = {};
+    }
+  } else if (settings && typeof settings === "object") {
+    source = settings;
+  }
+  const numeric = (value, fallback, min, max) => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(min, Math.min(max, Math.round(parsed)));
+  };
+  const fields = Array.isArray(source.fields) ? source.fields.filter((field) => DEFAULT_FIELD_ORDER.includes(field)) : DEFAULT_PRODUCT_LABEL_SETTINGS.fields;
+  return {
+    ...DEFAULT_PRODUCT_LABEL_SETTINGS,
+    ...source,
+    widthMm: numeric(source.widthMm, DEFAULT_PRODUCT_LABEL_SETTINGS.widthMm, 30, 110),
+    heightMm: numeric(source.heightMm, DEFAULT_PRODUCT_LABEL_SETTINGS.heightMm, 20, 200),
+    gapMm: numeric(source.gapMm, DEFAULT_PRODUCT_LABEL_SETTINGS.gapMm, 0, 20),
+    density: numeric(source.density, DEFAULT_PRODUCT_LABEL_SETTINGS.density, 0, 15),
+    speed: numeric(source.speed, DEFAULT_PRODUCT_LABEL_SETTINGS.speed, 1, 12),
+    copies: numeric(source.copies, DEFAULT_PRODUCT_LABEL_SETTINGS.copies, 1, 20),
+    fields: fields.length > 0 ? fields : DEFAULT_PRODUCT_LABEL_SETTINGS.fields,
+    rotation: source.rotation === 90 || source.rotation === 180 || source.rotation === 270 ? source.rotation : 0
+  };
+}
+
+// ../Sistemadegerenciamentodepedidos/src/utils/print-settings.ts
+function normalizeCopiesByRoute(value) {
+  const source = parseRecordValue(value);
+  return {
+    counter: source.counter === 2 ? 2 : 1,
+    kitchen: source.kitchen === 2 ? 2 : 1,
+    bar: source.bar === 2 ? 2 : 1
+  };
+}
+var STORAGE_KEY = "print_settings";
+var DEFAULT_KITCHEN_SETTINGS = {
+  paperWidth: 48,
+  marginLeft: 0,
+  marginRight: 0,
+  lineSpacing: "normal",
+  fontSize: "normal",
+  mediumTitle: true,
+  mediumItems: true,
+  boldBorderName: false,
+  showDateTime: true,
+  showItemPrice: false,
+  showItemQuantity: true,
+  showItemNotes: true,
+  groupByCategory: true,
+  showTotal: false,
+  showPaymentMethod: false,
+  showDeliveryInfo: false,
+  customFooter: "",
+  autoCut: true,
+  feedLines: 3,
+  separatorChar: "-",
+  showCustomerInfo: true,
+  showOrderNotes: true,
+  showOperator: true,
+  highlightBeverages: true,
+  highlightPromotions: false,
+  autoPrintAddedItemsOnEdit: false,
+  showPizzaFlavorDescriptions: false,
+  showOrderNumber: true,
+  showWaiterLine: false,
+  showOperatorLine: false,
+  showOriginLine: false,
+  showLocationLine: false,
+  showNeighborhoodLine: false,
+  showEstimateLine: false,
+  showCustomerOrdersLine: false,
+  showMarketplaceCodesLine: false
+};
+var DEFAULT_BAR_SETTINGS = {
+  ...DEFAULT_KITCHEN_SETTINGS
+};
+var DEFAULT_RECEIPT_LAYOUT_PROFILES = {
+  counter: { safeMarginDots: 0, horizontalOffsetDots: 0 },
+  kitchen: { safeMarginDots: 0, horizontalOffsetDots: 0 },
+  bar: { safeMarginDots: 0, horizontalOffsetDots: 0 }
+};
+var DEFAULT_SETTINGS = {
+  paperWidth: 48,
+  marginLeft: 0,
+  marginRight: 0,
+  lineSpacing: "normal",
+  fontSize: "normal",
+  mediumTitle: true,
+  mediumItems: false,
+  boldBorderName: false,
+  showStoreName: true,
+  storeName: "",
+  showStorePhone: "",
+  showDateTime: true,
+  showItemPrice: true,
+  showItemQuantity: true,
+  showItemNotes: true,
+  groupByCategory: true,
+  showTotal: true,
+  showPaymentMethod: true,
+  showDeliveryInfo: true,
+  customFooter: "",
+  autoCut: true,
+  feedLines: 3,
+  separatorChar: "-",
+  showCustomerInfo: true,
+  showOrderNotes: true,
+  showOperator: true,
+  logoBase64: "",
+  autoPrintEnabled: false,
+  autoPrintType: "counter",
+  autoPrintRoutes: ["counter"],
+  autoPrintOnAcceptEnabled: false,
+  kdsReadyPrintEnabled: false,
+  kdsReadyPrintRoutes: [],
+  barPrintEnabled: false,
+  highlightBeverages: true,
+  highlightPromotions: false,
+  showPizzaFlavorDescriptions: false,
+  kitchenSettings: DEFAULT_KITCHEN_SETTINGS,
+  barSettings: DEFAULT_BAR_SETTINGS,
+  receiptLayoutProfiles: DEFAULT_RECEIPT_LAYOUT_PROFILES,
+  copiesByRoute: { counter: 1, kitchen: 1, bar: 1 },
+  autoPrintStation: null,
+  productLabelSettings: DEFAULT_PRODUCT_LABEL_SETTINGS
+};
+var VALID_PAPER_WIDTHS = /* @__PURE__ */ new Set([32, 42, 48]);
+var VALID_LINE_SPACING = /* @__PURE__ */ new Set(["compact", "normal", "wide"]);
+var VALID_FONT_SIZES = /* @__PURE__ */ new Set(["small", "normal", "large"]);
+var VALID_SEPARATOR_CHARS = /* @__PURE__ */ new Set(["-", "=", "*", "_"]);
+var VALID_AUTO_PRINT_ROUTES = /* @__PURE__ */ new Set(["counter", "kitchen", "bar"]);
+var VALID_KDS_READY_PRINT_ROUTES = /* @__PURE__ */ new Set(["counter", "kitchen"]);
+function normalizeLineSpacing(value) {
+  return value === "compact" || value === "wide" ? value : "normal";
+}
+function parseKitchenSettingsValue(value) {
+  if (!value) return {};
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof value === "object" ? value : {};
+}
+function parseRecordValue(value) {
+  if (!value) return {};
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function clampNumber(value, fallback, min, max) {
+  if (value === null || value === void 0 || value === "") return fallback;
+  const raw = typeof value === "number" ? value : String(value).trim();
+  const normalized = typeof raw === "number" ? raw : raw.includes(",") ? raw.replace(/\./g, "").replace(",", ".") : raw;
+  const numeric = Number(normalized);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(numeric)));
+}
+function normalizeKitchenPrintSettings(value) {
+  const raw = parseKitchenSettingsValue(value);
+  const paperWidth = Number(raw.paperWidth);
+  return {
+    paperWidth: VALID_PAPER_WIDTHS.has(paperWidth) ? paperWidth : DEFAULT_KITCHEN_SETTINGS.paperWidth,
+    marginLeft: clampNumber(raw.marginLeft, DEFAULT_KITCHEN_SETTINGS.marginLeft, 0, 5),
+    marginRight: clampNumber(raw.marginRight, DEFAULT_KITCHEN_SETTINGS.marginRight, 0, 5),
+    lineSpacing: normalizeLineSpacing(VALID_LINE_SPACING.has(String(raw.lineSpacing)) ? raw.lineSpacing : DEFAULT_KITCHEN_SETTINGS.lineSpacing),
+    // Cozinha e bar não têm "Grande": um 'large' salvo passa a ser 'normal'.
+    fontSize: raw.fontSize === "large" ? "normal" : VALID_FONT_SIZES.has(String(raw.fontSize)) ? raw.fontSize : DEFAULT_KITCHEN_SETTINGS.fontSize,
+    mediumTitle: raw.mediumTitle ?? DEFAULT_KITCHEN_SETTINGS.mediumTitle,
+    mediumItems: raw.mediumItems ?? DEFAULT_KITCHEN_SETTINGS.mediumItems,
+    boldBorderName: raw.boldBorderName === true,
+    showDateTime: raw.showDateTime ?? DEFAULT_KITCHEN_SETTINGS.showDateTime,
+    showItemPrice: raw.showItemPrice ?? DEFAULT_KITCHEN_SETTINGS.showItemPrice,
+    showItemQuantity: raw.showItemQuantity ?? DEFAULT_KITCHEN_SETTINGS.showItemQuantity,
+    showItemNotes: raw.showItemNotes ?? DEFAULT_KITCHEN_SETTINGS.showItemNotes,
+    groupByCategory: raw.groupByCategory ?? DEFAULT_KITCHEN_SETTINGS.groupByCategory,
+    showTotal: raw.showTotal ?? DEFAULT_KITCHEN_SETTINGS.showTotal,
+    showPaymentMethod: raw.showPaymentMethod ?? DEFAULT_KITCHEN_SETTINGS.showPaymentMethod,
+    showDeliveryInfo: raw.showDeliveryInfo ?? DEFAULT_KITCHEN_SETTINGS.showDeliveryInfo,
+    customFooter: raw.customFooter ?? DEFAULT_KITCHEN_SETTINGS.customFooter,
+    autoCut: raw.autoCut ?? DEFAULT_KITCHEN_SETTINGS.autoCut,
+    feedLines: clampNumber(raw.feedLines, DEFAULT_KITCHEN_SETTINGS.feedLines, 1, 6),
+    separatorChar: VALID_SEPARATOR_CHARS.has(String(raw.separatorChar)) ? raw.separatorChar : DEFAULT_KITCHEN_SETTINGS.separatorChar,
+    showCustomerInfo: raw.showCustomerInfo ?? DEFAULT_KITCHEN_SETTINGS.showCustomerInfo,
+    showOrderNotes: raw.showOrderNotes ?? DEFAULT_KITCHEN_SETTINGS.showOrderNotes,
+    showOperator: raw.showOperator ?? DEFAULT_KITCHEN_SETTINGS.showOperator,
+    highlightBeverages: raw.highlightBeverages ?? DEFAULT_KITCHEN_SETTINGS.highlightBeverages,
+    highlightPromotions: raw.highlightPromotions === true,
+    autoPrintAddedItemsOnEdit: raw.autoPrintAddedItemsOnEdit ?? DEFAULT_KITCHEN_SETTINGS.autoPrintAddedItemsOnEdit,
+    showPizzaFlavorDescriptions: raw.showPizzaFlavorDescriptions ?? DEFAULT_KITCHEN_SETTINGS.showPizzaFlavorDescriptions,
+    showOrderNumber: raw.showOrderNumber !== false,
+    showWaiterLine: raw.showWaiterLine === true,
+    showOperatorLine: raw.showOperatorLine === true,
+    showOriginLine: raw.showOriginLine === true,
+    showLocationLine: raw.showLocationLine === true,
+    showNeighborhoodLine: raw.showNeighborhoodLine === true,
+    showEstimateLine: raw.showEstimateLine === true,
+    showCustomerOrdersLine: raw.showCustomerOrdersLine === true,
+    showMarketplaceCodesLine: raw.showMarketplaceCodesLine === true
+  };
+}
+function normalizeReceiptLayoutProfile(value) {
+  const raw = parseRecordValue(value);
+  const requestedSafeMargin = clampNumber(raw.safeMarginDots, 0, 0, 96);
+  const requestedOffset = clampNumber(raw.horizontalOffsetDots, 0, -96, 96);
+  const isLegacyAutomaticInset = requestedSafeMargin === 12 && requestedOffset === 0 && !Number.isFinite(Number(raw.printAreaDots));
+  const normalized = {
+    safeMarginDots: isLegacyAutomaticInset ? 0 : requestedSafeMargin,
+    horizontalOffsetDots: requestedOffset
+  };
+  const requestedPrintArea = Number(raw.printAreaDots);
+  if (Number.isFinite(requestedPrintArea) && requestedPrintArea > 0) {
+    normalized.printAreaDots = clampNumber(requestedPrintArea, 576, 240, 576);
+  }
+  return normalized;
+}
+function normalizeReceiptLayoutProfiles(value) {
+  const raw = parseRecordValue(value);
+  return {
+    counter: normalizeReceiptLayoutProfile(raw.counter),
+    kitchen: normalizeReceiptLayoutProfile(raw.kitchen),
+    bar: normalizeReceiptLayoutProfile(raw.bar)
+  };
+}
+function normalizeAutoPrintType(value) {
+  return value === "kitchen" || value === "both" ? value : "counter";
+}
+function parseAutoPrintRoutesValue(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return trimmed.split(",").map((entry) => entry.trim()).filter(Boolean);
+    }
+  }
+  return null;
+}
+function getAutoPrintRoutesFromLegacy(autoPrintType, barPrintEnabled = false) {
+  const normalizedType = normalizeAutoPrintType(autoPrintType);
+  const routes = [];
+  if (normalizedType === "counter" || normalizedType === "both") routes.push("counter");
+  if (normalizedType === "kitchen" || normalizedType === "both") routes.push("kitchen");
+  if (barPrintEnabled) routes.push("bar");
+  return routes;
+}
+function normalizeAutoPrintRoutes(value, options = {}) {
+  const parsed = parseAutoPrintRoutesValue(value);
+  const source = parsed ?? getAutoPrintRoutesFromLegacy(options.autoPrintType, options.barPrintEnabled === true);
+  const routes = [];
+  for (const route of source) {
+    const normalized = String(route || "").trim().toLowerCase();
+    if (!VALID_AUTO_PRINT_ROUTES.has(normalized)) continue;
+    if (!routes.includes(normalized)) {
+      routes.push(normalized);
+    }
+  }
+  return routes;
+}
+function normalizeKdsReadyPrintRoutes(value) {
+  const parsed = parseAutoPrintRoutesValue(value) ?? [];
+  const routes = [];
+  for (const route of parsed) {
+    const normalized = String(route || "").trim().toLowerCase();
+    if (!VALID_KDS_READY_PRINT_ROUTES.has(normalized) || routes.includes(normalized)) continue;
+    routes.push(normalized);
+  }
+  return routes;
+}
+function normalizePrintSettings(settings) {
+  const merged = { ...DEFAULT_SETTINGS, ...settings };
+  const paperWidth = Number(merged.paperWidth);
+  const autoPrintType = normalizeAutoPrintType(merged.autoPrintType);
+  const barPrintEnabled = merged.barPrintEnabled === true;
+  const hasExplicitAutoPrintRoutes = Object.prototype.hasOwnProperty.call(settings, "autoPrintRoutes");
+  const autoPrintRoutes = normalizeAutoPrintRoutes(hasExplicitAutoPrintRoutes ? settings.autoPrintRoutes : void 0, {
+    autoPrintType,
+    barPrintEnabled
+  });
+  const kdsReadyPrintEnabled = merged.kdsReadyPrintEnabled === true;
+  return {
+    ...merged,
+    paperWidth: VALID_PAPER_WIDTHS.has(paperWidth) ? paperWidth : DEFAULT_SETTINGS.paperWidth,
+    marginLeft: clampNumber(merged.marginLeft, DEFAULT_SETTINGS.marginLeft, 0, 5),
+    marginRight: clampNumber(merged.marginRight, DEFAULT_SETTINGS.marginRight, 0, 5),
+    lineSpacing: normalizeLineSpacing(merged.lineSpacing),
+    fontSize: VALID_FONT_SIZES.has(String(merged.fontSize)) ? merged.fontSize : DEFAULT_SETTINGS.fontSize,
+    boldBorderName: merged.boldBorderName === true,
+    feedLines: clampNumber(merged.feedLines, DEFAULT_SETTINGS.feedLines, 1, 6),
+    separatorChar: VALID_SEPARATOR_CHARS.has(String(merged.separatorChar)) ? merged.separatorChar : DEFAULT_SETTINGS.separatorChar,
+    autoPrintEnabled: kdsReadyPrintEnabled ? false : merged.autoPrintEnabled === true,
+    autoPrintOnAcceptEnabled: kdsReadyPrintEnabled ? false : merged.autoPrintOnAcceptEnabled === true,
+    autoPrintType,
+    autoPrintRoutes,
+    kdsReadyPrintEnabled,
+    kdsReadyPrintRoutes: normalizeKdsReadyPrintRoutes(merged.kdsReadyPrintRoutes),
+    barPrintEnabled,
+    highlightPromotions: merged.highlightPromotions === true,
+    kitchenSettings: normalizeKitchenPrintSettings(merged.kitchenSettings),
+    barSettings: normalizeKitchenPrintSettings(merged.barSettings),
+    receiptLayoutProfiles: normalizeReceiptLayoutProfiles(merged.receiptLayoutProfiles),
+    copiesByRoute: normalizeCopiesByRoute(merged.copiesByRoute),
+    autoPrintStation: normalizeAutoPrintStation(merged.autoPrintStation),
+    productLabelSettings: normalizeProductLabelSettings(merged.productLabelSettings)
+  };
+}
+function getPrintSettingsForType(printType, settings = getPrintSettings()) {
+  const normalized = normalizePrintSettings(settings);
+  if (printType !== "kitchen" && printType !== "bar") {
+    return { ...normalized, activePrintRoute: printType };
+  }
+  const kitchenSettings = normalizeKitchenPrintSettings(
+    printType === "bar" ? normalized.barSettings : normalized.kitchenSettings
+  );
+  return {
+    ...normalized,
+    activePrintRoute: printType,
+    paperWidth: kitchenSettings.paperWidth,
+    marginLeft: kitchenSettings.marginLeft,
+    marginRight: kitchenSettings.marginRight,
+    lineSpacing: kitchenSettings.lineSpacing,
+    fontSize: kitchenSettings.fontSize,
+    mediumTitle: kitchenSettings.mediumTitle,
+    mediumItems: kitchenSettings.mediumItems,
+    showStoreName: false,
+    storeName: "",
+    showStorePhone: "",
+    showDateTime: kitchenSettings.showDateTime,
+    showItemPrice: kitchenSettings.showItemPrice,
+    showItemQuantity: kitchenSettings.showItemQuantity,
+    showItemNotes: kitchenSettings.showItemNotes,
+    groupByCategory: kitchenSettings.groupByCategory,
+    showTotal: kitchenSettings.showTotal,
+    showPaymentMethod: kitchenSettings.showPaymentMethod,
+    showDeliveryInfo: kitchenSettings.showDeliveryInfo,
+    customFooter: kitchenSettings.customFooter,
+    autoCut: kitchenSettings.autoCut,
+    feedLines: kitchenSettings.feedLines,
+    separatorChar: kitchenSettings.separatorChar,
+    showCustomerInfo: kitchenSettings.showCustomerInfo,
+    showOrderNotes: kitchenSettings.showOrderNotes,
+    showOperator: kitchenSettings.showOperator,
+    logoBase64: "",
+    highlightBeverages: kitchenSettings.highlightBeverages,
+    highlightPromotions: kitchenSettings.highlightPromotions,
+    showPizzaFlavorDescriptions: printType === "kitchen" ? kitchenSettings.showPizzaFlavorDescriptions : false,
+    kitchenSettings
+  };
+}
+var cachedSettings = null;
+var cacheTimestamp = 0;
+var CACHE_TTL = 6e4;
+function mapPrintSettingsFromDB(db) {
+  const source = db || {};
+  const kitchenRaw = parseKitchenSettingsValue(source.kitchen_print_settings);
+  const kitchenSettings = normalizeKitchenPrintSettings(
+    VALID_PAPER_WIDTHS.has(Number(kitchenRaw.paperWidth)) ? kitchenRaw : { ...kitchenRaw, paperWidth: source.paper_width }
+  );
+  const barRaw = parseKitchenSettingsValue(source.bar_print_settings);
+  const barSettings = source.bar_print_settings == null ? kitchenSettings : normalizeKitchenPrintSettings(
+    VALID_PAPER_WIDTHS.has(Number(barRaw.paperWidth)) ? barRaw : { ...barRaw, paperWidth: kitchenSettings.paperWidth }
+  );
+  return normalizePrintSettings({
+    paperWidth: source.paper_width || DEFAULT_SETTINGS.paperWidth,
+    marginLeft: source.margin_left ?? DEFAULT_SETTINGS.marginLeft,
+    marginRight: source.margin_right ?? DEFAULT_SETTINGS.marginRight,
+    lineSpacing: source.line_spacing || DEFAULT_SETTINGS.lineSpacing,
+    fontSize: source.font_size || DEFAULT_SETTINGS.fontSize,
+    mediumTitle: source.medium_title ?? DEFAULT_SETTINGS.mediumTitle,
+    mediumItems: source.medium_items ?? DEFAULT_SETTINGS.mediumItems,
+    boldBorderName: kitchenSettings.boldBorderName || barSettings.boldBorderName,
+    showStoreName: source.show_store_name ?? DEFAULT_SETTINGS.showStoreName,
+    storeName: source.store_name || DEFAULT_SETTINGS.storeName,
+    showStorePhone: source.store_phone || DEFAULT_SETTINGS.showStorePhone,
+    showDateTime: source.show_date_time ?? DEFAULT_SETTINGS.showDateTime,
+    showItemPrice: source.show_item_price ?? DEFAULT_SETTINGS.showItemPrice,
+    showItemQuantity: source.show_item_quantity ?? DEFAULT_SETTINGS.showItemQuantity,
+    showItemNotes: source.show_item_notes ?? DEFAULT_SETTINGS.showItemNotes,
+    groupByCategory: source.group_by_category ?? DEFAULT_SETTINGS.groupByCategory,
+    showTotal: source.show_total ?? DEFAULT_SETTINGS.showTotal,
+    showPaymentMethod: source.show_payment_method ?? DEFAULT_SETTINGS.showPaymentMethod,
+    showDeliveryInfo: source.show_delivery_info ?? DEFAULT_SETTINGS.showDeliveryInfo,
+    customFooter: source.custom_footer || DEFAULT_SETTINGS.customFooter,
+    autoCut: source.auto_cut ?? DEFAULT_SETTINGS.autoCut,
+    feedLines: source.feed_lines ?? DEFAULT_SETTINGS.feedLines,
+    separatorChar: source.separator_char || DEFAULT_SETTINGS.separatorChar,
+    showCustomerInfo: source.show_customer_info ?? DEFAULT_SETTINGS.showCustomerInfo,
+    showOrderNotes: source.show_order_notes ?? DEFAULT_SETTINGS.showOrderNotes,
+    showOperator: source.show_operator ?? DEFAULT_SETTINGS.showOperator,
+    logoBase64: source.logo_base64 || DEFAULT_SETTINGS.logoBase64,
+    autoPrintEnabled: source.auto_print_enabled ?? DEFAULT_SETTINGS.autoPrintEnabled,
+    autoPrintType: normalizeAutoPrintType(source.auto_print_type),
+    autoPrintRoutes: normalizeAutoPrintRoutes(source.auto_print_routes, {
+      autoPrintType: source.auto_print_type,
+      barPrintEnabled: source.bar_print_enabled === true
+    }),
+    autoPrintOnAcceptEnabled: source.auto_print_on_accept_enabled ?? DEFAULT_SETTINGS.autoPrintOnAcceptEnabled,
+    kdsReadyPrintEnabled: source.kds_ready_print_enabled ?? DEFAULT_SETTINGS.kdsReadyPrintEnabled,
+    kdsReadyPrintRoutes: normalizeKdsReadyPrintRoutes(source.kds_ready_print_routes),
+    barPrintEnabled: source.bar_print_enabled ?? DEFAULT_SETTINGS.barPrintEnabled,
+    highlightBeverages: source.highlight_beverages ?? DEFAULT_SETTINGS.highlightBeverages,
+    highlightPromotions: source.highlight_promotions === true,
+    kitchenSettings,
+    barSettings,
+    receiptLayoutProfiles: normalizeReceiptLayoutProfiles(source.receipt_layout_profiles),
+    copiesByRoute: normalizeCopiesByRoute(source.copies_by_route),
+    autoPrintStation: normalizeAutoPrintStation(source.auto_print_station),
+    productLabelSettings: normalizeProductLabelSettings(source.product_label_settings)
+  });
+}
+function getPrintSettings() {
+  if (cachedSettings && Date.now() - cacheTimestamp < CACHE_TTL) {
+    return cachedSettings;
+  }
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const parsed = normalizePrintSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(saved) });
+      cachedSettings = parsed;
+      cacheTimestamp = Date.now();
+      return parsed;
+    }
+  } catch (e) {
+    console.error("Erro ao carregar configura\xE7\xF5es de impress\xE3o:", e);
+  }
+  return DEFAULT_SETTINGS;
+}
+function setPrintSettingsCache(settings) {
+  const normalized = normalizePrintSettings(settings);
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+    localStorage.setItem("autoPrintOrders", String(normalized.autoPrintEnabled));
+    localStorage.setItem("autoPrintType", normalized.autoPrintType);
+    localStorage.setItem("autoPrintRoutes", JSON.stringify(normalized.autoPrintRoutes));
+    localStorage.setItem("autoPrintOnAccept", String(normalized.autoPrintOnAcceptEnabled));
+    localStorage.setItem("barPrintEnabled", String(normalized.barPrintEnabled));
+  } catch {
+  }
+  cachedSettings = normalized;
+  cacheTimestamp = Date.now();
 }
 
 // ../Sistemadegerenciamentodepedidos/src/utils/receipt-geometry.ts
@@ -36312,6 +36812,24 @@ function resolveReceiptItemGrid(geometry, options = {}) {
   };
 }
 function formatReceiptItemRows(input, grid) {
+  const fullQuantity = String(input.quantity ?? "").trim();
+  if (textLength(fullQuantity) > grid.quantityWidth) {
+    const total2 = String(input.total ?? "").trim();
+    const totalOnFirstLine = grid.showTotal && Boolean(total2) && textLength(total2) <= grid.totalWidth;
+    const totalTail = (value) => grid.showTotal ? `${" ".repeat(grid.gapWidth)}${value.padStart(grid.totalWidth)}` : "";
+    const firstWidth = Math.max(1, grid.columns - textLength(fullQuantity) - grid.gapWidth - (grid.showTotal ? grid.totalWidth + grid.gapWidth : 0));
+    const words = String(input.description ?? "").trim().split(/\s+/).filter(Boolean);
+    let first = "";
+    while (words.length && textLength(`${first}${first ? " " : ""}${words[0]}`) <= firstWidth) {
+      first = `${first}${first ? " " : ""}${words.shift()}`;
+    }
+    const rows2 = [
+      `${fullQuantity}${" ".repeat(grid.gapWidth)}${first.padEnd(firstWidth)}${totalTail(totalOnFirstLine ? total2 : "")}`,
+      ...(words.length ? wrapReceiptText(words.join(" "), grid.itemWidth) : []).map((line) => `${" ".repeat(grid.descriptionStart)}${line.padEnd(grid.itemWidth)}${totalTail("")}`)
+    ];
+    if (grid.showTotal && total2 && !totalOnFirstLine) rows2.push(total2.slice(-grid.columns).padStart(grid.columns));
+    return rows2;
+  }
   if (grid.showTotal && textLength(String(input.description ?? "").trim()) > grid.itemWidth) {
     const fullWidthGrid = resolveReceiptItemGrid({ contentColumns: grid.columns }, { showTotal: false });
     const rows2 = formatReceiptItemRows({ ...input, total: void 0 }, fullWidthGrid);
@@ -36336,468 +36854,6 @@ function formatReceiptItemRows(input, grid) {
     rows.push(total.slice(-grid.columns).padStart(grid.columns));
   }
   return rows;
-}
-
-// ../Sistemadegerenciamentodepedidos/src/utils/product-label-print.ts
-var DEFAULT_PRODUCT_LABEL_SETTINGS = {
-  widthMm: 100,
-  heightMm: 50,
-  gapMm: 3,
-  density: 8,
-  speed: 4,
-  copies: 1,
-  fields: ["productName", "price", "sku", "expiresAt"],
-  rotation: 0
-};
-var DEFAULT_FIELD_ORDER = [
-  "storeName",
-  "productName",
-  "price",
-  "sku",
-  "barcode",
-  "batch",
-  "producedAt",
-  "expiresAt",
-  "observation"
-];
-function normalizeProductLabelSettings(settings) {
-  let source = {};
-  if (typeof settings === "string") {
-    try {
-      const parsed = JSON.parse(settings);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        source = parsed;
-      }
-    } catch {
-      source = {};
-    }
-  } else if (settings && typeof settings === "object") {
-    source = settings;
-  }
-  const numeric = (value, fallback, min, max) => {
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed)) return fallback;
-    return Math.max(min, Math.min(max, Math.round(parsed)));
-  };
-  const fields = Array.isArray(source.fields) ? source.fields.filter((field) => DEFAULT_FIELD_ORDER.includes(field)) : DEFAULT_PRODUCT_LABEL_SETTINGS.fields;
-  return {
-    ...DEFAULT_PRODUCT_LABEL_SETTINGS,
-    ...source,
-    widthMm: numeric(source.widthMm, DEFAULT_PRODUCT_LABEL_SETTINGS.widthMm, 30, 110),
-    heightMm: numeric(source.heightMm, DEFAULT_PRODUCT_LABEL_SETTINGS.heightMm, 20, 200),
-    gapMm: numeric(source.gapMm, DEFAULT_PRODUCT_LABEL_SETTINGS.gapMm, 0, 20),
-    density: numeric(source.density, DEFAULT_PRODUCT_LABEL_SETTINGS.density, 0, 15),
-    speed: numeric(source.speed, DEFAULT_PRODUCT_LABEL_SETTINGS.speed, 1, 12),
-    copies: numeric(source.copies, DEFAULT_PRODUCT_LABEL_SETTINGS.copies, 1, 20),
-    fields: fields.length > 0 ? fields : DEFAULT_PRODUCT_LABEL_SETTINGS.fields,
-    rotation: source.rotation === 90 || source.rotation === 180 || source.rotation === 270 ? source.rotation : 0
-  };
-}
-
-// ../Sistemadegerenciamentodepedidos/src/utils/print-settings.ts
-function normalizeCopiesByRoute(value) {
-  const source = parseRecordValue(value);
-  return {
-    counter: source.counter === 2 ? 2 : 1,
-    kitchen: source.kitchen === 2 ? 2 : 1,
-    bar: source.bar === 2 ? 2 : 1
-  };
-}
-var STORAGE_KEY = "print_settings";
-var DEFAULT_KITCHEN_SETTINGS = {
-  paperWidth: 48,
-  marginLeft: 0,
-  marginRight: 0,
-  lineSpacing: "normal",
-  fontSize: "normal",
-  mediumTitle: true,
-  mediumItems: true,
-  boldBorderName: false,
-  showDateTime: true,
-  showItemPrice: false,
-  showItemQuantity: true,
-  showItemNotes: true,
-  groupByCategory: true,
-  showTotal: false,
-  showPaymentMethod: false,
-  showDeliveryInfo: false,
-  customFooter: "",
-  autoCut: true,
-  feedLines: 3,
-  separatorChar: "-",
-  showCustomerInfo: true,
-  showOrderNotes: true,
-  showOperator: true,
-  highlightBeverages: true,
-  highlightPromotions: false,
-  autoPrintAddedItemsOnEdit: false,
-  showPizzaFlavorDescriptions: false,
-  showOrderNumber: true
-};
-var DEFAULT_BAR_SETTINGS = {
-  ...DEFAULT_KITCHEN_SETTINGS
-};
-var DEFAULT_RECEIPT_LAYOUT_PROFILES = {
-  counter: { safeMarginDots: 0, horizontalOffsetDots: 0 },
-  kitchen: { safeMarginDots: 0, horizontalOffsetDots: 0 },
-  bar: { safeMarginDots: 0, horizontalOffsetDots: 0 }
-};
-var DEFAULT_SETTINGS = {
-  paperWidth: 48,
-  marginLeft: 0,
-  marginRight: 0,
-  lineSpacing: "normal",
-  fontSize: "normal",
-  mediumTitle: true,
-  mediumItems: false,
-  boldBorderName: false,
-  showStoreName: true,
-  storeName: "",
-  showStorePhone: "",
-  showDateTime: true,
-  showItemPrice: true,
-  showItemQuantity: true,
-  showItemNotes: true,
-  groupByCategory: true,
-  showTotal: true,
-  showPaymentMethod: true,
-  showDeliveryInfo: true,
-  customFooter: "",
-  autoCut: true,
-  feedLines: 3,
-  separatorChar: "-",
-  showCustomerInfo: true,
-  showOrderNotes: true,
-  showOperator: true,
-  logoBase64: "",
-  autoPrintEnabled: false,
-  autoPrintType: "counter",
-  autoPrintRoutes: ["counter"],
-  autoPrintOnAcceptEnabled: false,
-  kdsReadyPrintEnabled: false,
-  kdsReadyPrintRoutes: [],
-  barPrintEnabled: false,
-  highlightBeverages: true,
-  highlightPromotions: false,
-  showPizzaFlavorDescriptions: false,
-  kitchenSettings: DEFAULT_KITCHEN_SETTINGS,
-  barSettings: DEFAULT_BAR_SETTINGS,
-  receiptLayoutProfiles: DEFAULT_RECEIPT_LAYOUT_PROFILES,
-  copiesByRoute: { counter: 1, kitchen: 1, bar: 1 },
-  autoPrintStation: null,
-  productLabelSettings: DEFAULT_PRODUCT_LABEL_SETTINGS
-};
-var VALID_PAPER_WIDTHS = /* @__PURE__ */ new Set([32, 42, 48]);
-var VALID_LINE_SPACING = /* @__PURE__ */ new Set(["compact", "normal", "wide"]);
-var VALID_FONT_SIZES = /* @__PURE__ */ new Set(["small", "normal", "large"]);
-var VALID_SEPARATOR_CHARS = /* @__PURE__ */ new Set(["-", "=", "*", "_"]);
-var VALID_AUTO_PRINT_ROUTES = /* @__PURE__ */ new Set(["counter", "kitchen", "bar"]);
-var VALID_KDS_READY_PRINT_ROUTES = /* @__PURE__ */ new Set(["counter", "kitchen"]);
-function normalizeLineSpacing(value) {
-  return value === "compact" || value === "wide" ? value : "normal";
-}
-function parseKitchenSettingsValue(value) {
-  if (!value) return {};
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value);
-      return parsed && typeof parsed === "object" ? parsed : {};
-    } catch {
-      return {};
-    }
-  }
-  return typeof value === "object" ? value : {};
-}
-function parseRecordValue(value) {
-  if (!value) return {};
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-    } catch {
-      return {};
-    }
-  }
-  return typeof value === "object" && !Array.isArray(value) ? value : {};
-}
-function clampNumber(value, fallback, min, max) {
-  if (value === null || value === void 0 || value === "") return fallback;
-  const raw = typeof value === "number" ? value : String(value).trim();
-  const normalized = typeof raw === "number" ? raw : raw.includes(",") ? raw.replace(/\./g, "").replace(",", ".") : raw;
-  const numeric = Number(normalized);
-  if (!Number.isFinite(numeric)) return fallback;
-  return Math.min(max, Math.max(min, Math.round(numeric)));
-}
-function normalizeKitchenPrintSettings(value) {
-  const raw = parseKitchenSettingsValue(value);
-  const paperWidth = Number(raw.paperWidth);
-  return {
-    paperWidth: VALID_PAPER_WIDTHS.has(paperWidth) ? paperWidth : DEFAULT_KITCHEN_SETTINGS.paperWidth,
-    marginLeft: clampNumber(raw.marginLeft, DEFAULT_KITCHEN_SETTINGS.marginLeft, 0, 5),
-    marginRight: clampNumber(raw.marginRight, DEFAULT_KITCHEN_SETTINGS.marginRight, 0, 5),
-    lineSpacing: normalizeLineSpacing(VALID_LINE_SPACING.has(String(raw.lineSpacing)) ? raw.lineSpacing : DEFAULT_KITCHEN_SETTINGS.lineSpacing),
-    fontSize: VALID_FONT_SIZES.has(String(raw.fontSize)) ? raw.fontSize : DEFAULT_KITCHEN_SETTINGS.fontSize,
-    mediumTitle: raw.mediumTitle ?? DEFAULT_KITCHEN_SETTINGS.mediumTitle,
-    mediumItems: raw.mediumItems ?? DEFAULT_KITCHEN_SETTINGS.mediumItems,
-    boldBorderName: raw.boldBorderName === true,
-    showDateTime: raw.showDateTime ?? DEFAULT_KITCHEN_SETTINGS.showDateTime,
-    showItemPrice: raw.showItemPrice ?? DEFAULT_KITCHEN_SETTINGS.showItemPrice,
-    showItemQuantity: raw.showItemQuantity ?? DEFAULT_KITCHEN_SETTINGS.showItemQuantity,
-    showItemNotes: raw.showItemNotes ?? DEFAULT_KITCHEN_SETTINGS.showItemNotes,
-    groupByCategory: raw.groupByCategory ?? DEFAULT_KITCHEN_SETTINGS.groupByCategory,
-    showTotal: raw.showTotal ?? DEFAULT_KITCHEN_SETTINGS.showTotal,
-    showPaymentMethod: raw.showPaymentMethod ?? DEFAULT_KITCHEN_SETTINGS.showPaymentMethod,
-    showDeliveryInfo: raw.showDeliveryInfo ?? DEFAULT_KITCHEN_SETTINGS.showDeliveryInfo,
-    customFooter: raw.customFooter ?? DEFAULT_KITCHEN_SETTINGS.customFooter,
-    autoCut: raw.autoCut ?? DEFAULT_KITCHEN_SETTINGS.autoCut,
-    feedLines: clampNumber(raw.feedLines, DEFAULT_KITCHEN_SETTINGS.feedLines, 1, 6),
-    separatorChar: VALID_SEPARATOR_CHARS.has(String(raw.separatorChar)) ? raw.separatorChar : DEFAULT_KITCHEN_SETTINGS.separatorChar,
-    showCustomerInfo: raw.showCustomerInfo ?? DEFAULT_KITCHEN_SETTINGS.showCustomerInfo,
-    showOrderNotes: raw.showOrderNotes ?? DEFAULT_KITCHEN_SETTINGS.showOrderNotes,
-    showOperator: raw.showOperator ?? DEFAULT_KITCHEN_SETTINGS.showOperator,
-    highlightBeverages: raw.highlightBeverages ?? DEFAULT_KITCHEN_SETTINGS.highlightBeverages,
-    highlightPromotions: raw.highlightPromotions === true,
-    autoPrintAddedItemsOnEdit: raw.autoPrintAddedItemsOnEdit ?? DEFAULT_KITCHEN_SETTINGS.autoPrintAddedItemsOnEdit,
-    showPizzaFlavorDescriptions: raw.showPizzaFlavorDescriptions ?? DEFAULT_KITCHEN_SETTINGS.showPizzaFlavorDescriptions,
-    showOrderNumber: raw.showOrderNumber !== false
-  };
-}
-function normalizeReceiptLayoutProfile(value) {
-  const raw = parseRecordValue(value);
-  const requestedSafeMargin = clampNumber(raw.safeMarginDots, 0, 0, 96);
-  const requestedOffset = clampNumber(raw.horizontalOffsetDots, 0, -96, 96);
-  const isLegacyAutomaticInset = requestedSafeMargin === 12 && requestedOffset === 0 && !Number.isFinite(Number(raw.printAreaDots));
-  const normalized = {
-    safeMarginDots: isLegacyAutomaticInset ? 0 : requestedSafeMargin,
-    horizontalOffsetDots: requestedOffset
-  };
-  const requestedPrintArea = Number(raw.printAreaDots);
-  if (Number.isFinite(requestedPrintArea) && requestedPrintArea > 0) {
-    normalized.printAreaDots = clampNumber(requestedPrintArea, 576, 240, 576);
-  }
-  return normalized;
-}
-function normalizeReceiptLayoutProfiles(value) {
-  const raw = parseRecordValue(value);
-  return {
-    counter: normalizeReceiptLayoutProfile(raw.counter),
-    kitchen: normalizeReceiptLayoutProfile(raw.kitchen),
-    bar: normalizeReceiptLayoutProfile(raw.bar)
-  };
-}
-function normalizeAutoPrintType(value) {
-  return value === "kitchen" || value === "both" ? value : "counter";
-}
-function parseAutoPrintRoutesValue(value) {
-  if (Array.isArray(value)) return value;
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    try {
-      const parsed = JSON.parse(trimmed);
-      return Array.isArray(parsed) ? parsed : null;
-    } catch {
-      return trimmed.split(",").map((entry) => entry.trim()).filter(Boolean);
-    }
-  }
-  return null;
-}
-function getAutoPrintRoutesFromLegacy(autoPrintType, barPrintEnabled = false) {
-  const normalizedType = normalizeAutoPrintType(autoPrintType);
-  const routes = [];
-  if (normalizedType === "counter" || normalizedType === "both") routes.push("counter");
-  if (normalizedType === "kitchen" || normalizedType === "both") routes.push("kitchen");
-  if (barPrintEnabled) routes.push("bar");
-  return routes;
-}
-function normalizeAutoPrintRoutes(value, options = {}) {
-  const parsed = parseAutoPrintRoutesValue(value);
-  const source = parsed ?? getAutoPrintRoutesFromLegacy(options.autoPrintType, options.barPrintEnabled === true);
-  const routes = [];
-  for (const route of source) {
-    const normalized = String(route || "").trim().toLowerCase();
-    if (!VALID_AUTO_PRINT_ROUTES.has(normalized)) continue;
-    if (!routes.includes(normalized)) {
-      routes.push(normalized);
-    }
-  }
-  return routes;
-}
-function normalizeKdsReadyPrintRoutes(value) {
-  const parsed = parseAutoPrintRoutesValue(value) ?? [];
-  const routes = [];
-  for (const route of parsed) {
-    const normalized = String(route || "").trim().toLowerCase();
-    if (!VALID_KDS_READY_PRINT_ROUTES.has(normalized) || routes.includes(normalized)) continue;
-    routes.push(normalized);
-  }
-  return routes;
-}
-function normalizePrintSettings(settings) {
-  const merged = { ...DEFAULT_SETTINGS, ...settings };
-  const paperWidth = Number(merged.paperWidth);
-  const autoPrintType = normalizeAutoPrintType(merged.autoPrintType);
-  const barPrintEnabled = merged.barPrintEnabled === true;
-  const hasExplicitAutoPrintRoutes = Object.prototype.hasOwnProperty.call(settings, "autoPrintRoutes");
-  const autoPrintRoutes = normalizeAutoPrintRoutes(hasExplicitAutoPrintRoutes ? settings.autoPrintRoutes : void 0, {
-    autoPrintType,
-    barPrintEnabled
-  });
-  const kdsReadyPrintEnabled = merged.kdsReadyPrintEnabled === true;
-  return {
-    ...merged,
-    paperWidth: VALID_PAPER_WIDTHS.has(paperWidth) ? paperWidth : DEFAULT_SETTINGS.paperWidth,
-    marginLeft: clampNumber(merged.marginLeft, DEFAULT_SETTINGS.marginLeft, 0, 5),
-    marginRight: clampNumber(merged.marginRight, DEFAULT_SETTINGS.marginRight, 0, 5),
-    lineSpacing: normalizeLineSpacing(merged.lineSpacing),
-    fontSize: VALID_FONT_SIZES.has(String(merged.fontSize)) ? merged.fontSize : DEFAULT_SETTINGS.fontSize,
-    boldBorderName: merged.boldBorderName === true,
-    feedLines: clampNumber(merged.feedLines, DEFAULT_SETTINGS.feedLines, 1, 6),
-    separatorChar: VALID_SEPARATOR_CHARS.has(String(merged.separatorChar)) ? merged.separatorChar : DEFAULT_SETTINGS.separatorChar,
-    autoPrintEnabled: kdsReadyPrintEnabled ? false : merged.autoPrintEnabled === true,
-    autoPrintOnAcceptEnabled: kdsReadyPrintEnabled ? false : merged.autoPrintOnAcceptEnabled === true,
-    autoPrintType,
-    autoPrintRoutes,
-    kdsReadyPrintEnabled,
-    kdsReadyPrintRoutes: normalizeKdsReadyPrintRoutes(merged.kdsReadyPrintRoutes),
-    barPrintEnabled,
-    highlightPromotions: merged.highlightPromotions === true,
-    kitchenSettings: normalizeKitchenPrintSettings(merged.kitchenSettings),
-    barSettings: normalizeKitchenPrintSettings(merged.barSettings),
-    receiptLayoutProfiles: normalizeReceiptLayoutProfiles(merged.receiptLayoutProfiles),
-    copiesByRoute: normalizeCopiesByRoute(merged.copiesByRoute),
-    autoPrintStation: normalizeAutoPrintStation(merged.autoPrintStation),
-    productLabelSettings: normalizeProductLabelSettings(merged.productLabelSettings)
-  };
-}
-function getPrintSettingsForType(printType, settings = getPrintSettings()) {
-  const normalized = normalizePrintSettings(settings);
-  if (printType !== "kitchen" && printType !== "bar") {
-    return { ...normalized, activePrintRoute: printType };
-  }
-  const kitchenSettings = normalizeKitchenPrintSettings(
-    printType === "bar" ? normalized.barSettings : normalized.kitchenSettings
-  );
-  return {
-    ...normalized,
-    activePrintRoute: printType,
-    paperWidth: kitchenSettings.paperWidth,
-    marginLeft: kitchenSettings.marginLeft,
-    marginRight: kitchenSettings.marginRight,
-    lineSpacing: kitchenSettings.lineSpacing,
-    fontSize: kitchenSettings.fontSize,
-    mediumTitle: kitchenSettings.mediumTitle,
-    mediumItems: kitchenSettings.mediumItems,
-    showStoreName: false,
-    storeName: "",
-    showStorePhone: "",
-    showDateTime: kitchenSettings.showDateTime,
-    showItemPrice: kitchenSettings.showItemPrice,
-    showItemQuantity: kitchenSettings.showItemQuantity,
-    showItemNotes: kitchenSettings.showItemNotes,
-    groupByCategory: kitchenSettings.groupByCategory,
-    showTotal: kitchenSettings.showTotal,
-    showPaymentMethod: kitchenSettings.showPaymentMethod,
-    showDeliveryInfo: kitchenSettings.showDeliveryInfo,
-    customFooter: kitchenSettings.customFooter,
-    autoCut: kitchenSettings.autoCut,
-    feedLines: kitchenSettings.feedLines,
-    separatorChar: kitchenSettings.separatorChar,
-    showCustomerInfo: kitchenSettings.showCustomerInfo,
-    showOrderNotes: kitchenSettings.showOrderNotes,
-    showOperator: kitchenSettings.showOperator,
-    logoBase64: "",
-    highlightBeverages: kitchenSettings.highlightBeverages,
-    highlightPromotions: kitchenSettings.highlightPromotions,
-    showPizzaFlavorDescriptions: printType === "kitchen" ? kitchenSettings.showPizzaFlavorDescriptions : false,
-    kitchenSettings
-  };
-}
-var cachedSettings = null;
-var cacheTimestamp = 0;
-var CACHE_TTL = 6e4;
-function mapPrintSettingsFromDB(db) {
-  const source = db || {};
-  const kitchenSettings = normalizeKitchenPrintSettings(source.kitchen_print_settings);
-  const barSettings = source.bar_print_settings == null ? normalizeKitchenPrintSettings(source.kitchen_print_settings) : normalizeKitchenPrintSettings(source.bar_print_settings);
-  return normalizePrintSettings({
-    paperWidth: source.paper_width || DEFAULT_SETTINGS.paperWidth,
-    marginLeft: source.margin_left ?? DEFAULT_SETTINGS.marginLeft,
-    marginRight: source.margin_right ?? DEFAULT_SETTINGS.marginRight,
-    lineSpacing: source.line_spacing || DEFAULT_SETTINGS.lineSpacing,
-    fontSize: source.font_size || DEFAULT_SETTINGS.fontSize,
-    mediumTitle: source.medium_title ?? DEFAULT_SETTINGS.mediumTitle,
-    mediumItems: source.medium_items ?? DEFAULT_SETTINGS.mediumItems,
-    boldBorderName: kitchenSettings.boldBorderName || barSettings.boldBorderName,
-    showStoreName: source.show_store_name ?? DEFAULT_SETTINGS.showStoreName,
-    storeName: source.store_name || DEFAULT_SETTINGS.storeName,
-    showStorePhone: source.store_phone || DEFAULT_SETTINGS.showStorePhone,
-    showDateTime: source.show_date_time ?? DEFAULT_SETTINGS.showDateTime,
-    showItemPrice: source.show_item_price ?? DEFAULT_SETTINGS.showItemPrice,
-    showItemQuantity: source.show_item_quantity ?? DEFAULT_SETTINGS.showItemQuantity,
-    showItemNotes: source.show_item_notes ?? DEFAULT_SETTINGS.showItemNotes,
-    groupByCategory: source.group_by_category ?? DEFAULT_SETTINGS.groupByCategory,
-    showTotal: source.show_total ?? DEFAULT_SETTINGS.showTotal,
-    showPaymentMethod: source.show_payment_method ?? DEFAULT_SETTINGS.showPaymentMethod,
-    showDeliveryInfo: source.show_delivery_info ?? DEFAULT_SETTINGS.showDeliveryInfo,
-    customFooter: source.custom_footer || DEFAULT_SETTINGS.customFooter,
-    autoCut: source.auto_cut ?? DEFAULT_SETTINGS.autoCut,
-    feedLines: source.feed_lines ?? DEFAULT_SETTINGS.feedLines,
-    separatorChar: source.separator_char || DEFAULT_SETTINGS.separatorChar,
-    showCustomerInfo: source.show_customer_info ?? DEFAULT_SETTINGS.showCustomerInfo,
-    showOrderNotes: source.show_order_notes ?? DEFAULT_SETTINGS.showOrderNotes,
-    showOperator: source.show_operator ?? DEFAULT_SETTINGS.showOperator,
-    logoBase64: source.logo_base64 || DEFAULT_SETTINGS.logoBase64,
-    autoPrintEnabled: source.auto_print_enabled ?? DEFAULT_SETTINGS.autoPrintEnabled,
-    autoPrintType: normalizeAutoPrintType(source.auto_print_type),
-    autoPrintRoutes: normalizeAutoPrintRoutes(source.auto_print_routes, {
-      autoPrintType: source.auto_print_type,
-      barPrintEnabled: source.bar_print_enabled === true
-    }),
-    autoPrintOnAcceptEnabled: source.auto_print_on_accept_enabled ?? DEFAULT_SETTINGS.autoPrintOnAcceptEnabled,
-    kdsReadyPrintEnabled: source.kds_ready_print_enabled ?? DEFAULT_SETTINGS.kdsReadyPrintEnabled,
-    kdsReadyPrintRoutes: normalizeKdsReadyPrintRoutes(source.kds_ready_print_routes),
-    barPrintEnabled: source.bar_print_enabled ?? DEFAULT_SETTINGS.barPrintEnabled,
-    highlightBeverages: source.highlight_beverages ?? DEFAULT_SETTINGS.highlightBeverages,
-    highlightPromotions: source.highlight_promotions === true,
-    kitchenSettings,
-    barSettings,
-    receiptLayoutProfiles: normalizeReceiptLayoutProfiles(source.receipt_layout_profiles),
-    copiesByRoute: normalizeCopiesByRoute(source.copies_by_route),
-    autoPrintStation: normalizeAutoPrintStation(source.auto_print_station),
-    productLabelSettings: normalizeProductLabelSettings(source.product_label_settings)
-  });
-}
-function getPrintSettings() {
-  if (cachedSettings && Date.now() - cacheTimestamp < CACHE_TTL) {
-    return cachedSettings;
-  }
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      const parsed = normalizePrintSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(saved) });
-      cachedSettings = parsed;
-      cacheTimestamp = Date.now();
-      return parsed;
-    }
-  } catch (e) {
-    console.error("Erro ao carregar configura\xE7\xF5es de impress\xE3o:", e);
-  }
-  return DEFAULT_SETTINGS;
-}
-function setPrintSettingsCache(settings) {
-  const normalized = normalizePrintSettings(settings);
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
-    localStorage.setItem("autoPrintOrders", String(normalized.autoPrintEnabled));
-    localStorage.setItem("autoPrintType", normalized.autoPrintType);
-    localStorage.setItem("autoPrintRoutes", JSON.stringify(normalized.autoPrintRoutes));
-    localStorage.setItem("autoPrintOnAccept", String(normalized.autoPrintOnAcceptEnabled));
-    localStorage.setItem("barPrintEnabled", String(normalized.barPrintEnabled));
-  } catch {
-  }
-  cachedSettings = normalized;
-  cacheTimestamp = Date.now();
 }
 
 // ../Sistemadegerenciamentodepedidos/src/utils/logo-printer.ts
@@ -37000,7 +37056,7 @@ function parseOrderNumber(raw) {
 }
 function getOrderNumberValue(input) {
   if (input == null) return null;
-  const raw = typeof input === "object" ? input.orderNumber ?? input.order_number ?? input.number : input;
+  const raw = typeof input === "object" ? input.orderNumber ?? input.order_number : input;
   if (raw == null || raw === "") return null;
   const numeric = parseOrderNumber(raw);
   return Number.isFinite(numeric) && numeric > 0 ? Math.trunc(numeric) : null;
@@ -37087,6 +37143,21 @@ function getMarketplaceOptionGroupType(option) {
 }
 
 // ../Sistemadegerenciamentodepedidos/src/utils/consolidate-order-items.ts
+var DETAIL_KEYS = [
+  "options",
+  "additions",
+  "complements",
+  "additionals",
+  "extras",
+  "modifiers",
+  "choices",
+  "customizations",
+  "subItems",
+  "sub_items",
+  "sub_item_list",
+  "comboItems",
+  "combo_items"
+];
 function isSimpleMergeableOrderItem(item) {
   if (!item) return false;
   if (item.isGift || item.is_gift) return false;
@@ -37104,6 +37175,8 @@ function isSimpleMergeableOrderItem(item) {
   if (Array.isArray(item.marmitaSelections) && item.marmitaSelections.length > 0) return false;
   if (item.borderName || item.border_name || item.border || item.stuffedCrustFlavor || item.stuffed_crust_flavor) return false;
   if (String(item.observations || item.obs || "").trim()) return false;
+  if (DETAIL_KEYS.some((k) => Array.isArray(item[k]) && item[k].length > 0)) return false;
+  if (String(item.notes || item.observation || item.remark || "").trim()) return false;
   return true;
 }
 function buildSimpleOrderItemKey(item) {
@@ -37396,7 +37469,7 @@ function resolvePrintableItemTotal(item) {
   );
   return Math.round(promotionPrice * quantity * 100) / 100;
 }
-function resolvePrintableOrderTotal(order) {
+function getPrintableOrderTotalParts(order) {
   const customData = (order == null ? void 0 : order.customData) || (order == null ? void 0 : order.custom_data) || {};
   const items = Array.isArray(order == null ? void 0 : order.items) ? order.items : [];
   const itemSubtotal = items.reduce(
@@ -37405,24 +37478,41 @@ function resolvePrintableOrderTotal(order) {
   );
   const declaredSubtotal = parsePrintableMoney(order == null ? void 0 : order.subtotal);
   const subtotal = declaredSubtotal > 0 ? declaredSubtotal : itemSubtotal;
-  const deliveryFee = Math.max(
-    parsePrintableMoney(order == null ? void 0 : order.delivery_fee),
-    parsePrintableMoney(order == null ? void 0 : order.deliveryFee)
-  );
-  const paymentFee = getOrderPaymentFee(order);
-  const discount = getDiscountAffectingOrderTotal(order, subtotal, firstPrintableMoney(order == null ? void 0 : order.discount));
-  const additionalCharges = firstPrintableMoney(
-    order == null ? void 0 : order.additionalCharges,
-    order == null ? void 0 : order.additional_charges,
-    customData == null ? void 0 : customData.additionalCharges,
-    customData == null ? void 0 : customData.additional_charges,
-    customData == null ? void 0 : customData.additionalFees
-  );
-  const addition = firstPrintableMoney(order == null ? void 0 : order.addition, order == null ? void 0 : order.additionValue, order == null ? void 0 : order.acrescimo, order == null ? void 0 : order["acr\xE9scimo"]);
-  const serviceFee = firstPrintableMoney(order == null ? void 0 : order.service_fee, order == null ? void 0 : order.serviceFee);
-  const smallOrderFee = firstPrintableMoney(order == null ? void 0 : order.small_order_fee, order == null ? void 0 : order.smallOrderFee);
-  const couvert = firstPrintableMoney(order == null ? void 0 : order.couvert);
-  const tip = firstPrintableMoney(order == null ? void 0 : order.tip, customData == null ? void 0 : customData.tip);
+  return {
+    subtotal,
+    deliveryFee: Math.max(
+      parsePrintableMoney(order == null ? void 0 : order.delivery_fee),
+      parsePrintableMoney(order == null ? void 0 : order.deliveryFee)
+    ),
+    paymentFee: getOrderPaymentFee(order),
+    discount: getDiscountAffectingOrderTotal(order, subtotal, firstPrintableMoney(order == null ? void 0 : order.discount)),
+    additionalCharges: firstPrintableMoney(
+      order == null ? void 0 : order.additionalCharges,
+      order == null ? void 0 : order.additional_charges,
+      customData == null ? void 0 : customData.additionalCharges,
+      customData == null ? void 0 : customData.additional_charges,
+      customData == null ? void 0 : customData.additionalFees
+    ),
+    addition: firstPrintableMoney(order == null ? void 0 : order.addition, order == null ? void 0 : order.additionValue, order == null ? void 0 : order.acrescimo, order == null ? void 0 : order["acr\xE9scimo"]),
+    serviceFee: firstPrintableMoney(order == null ? void 0 : order.service_fee, order == null ? void 0 : order.serviceFee),
+    smallOrderFee: firstPrintableMoney(order == null ? void 0 : order.small_order_fee, order == null ? void 0 : order.smallOrderFee),
+    couvert: firstPrintableMoney(order == null ? void 0 : order.couvert),
+    tip: firstPrintableMoney(order == null ? void 0 : order.tip, customData == null ? void 0 : customData.tip)
+  };
+}
+function resolvePrintableOrderTotal(order) {
+  const {
+    subtotal,
+    deliveryFee,
+    paymentFee,
+    discount,
+    additionalCharges,
+    addition,
+    serviceFee,
+    smallOrderFee,
+    couvert,
+    tip
+  } = getPrintableOrderTotalParts(order);
   const computedTotal = Math.max(
     0,
     subtotal + deliveryFee + paymentFee + additionalCharges + addition + serviceFee + smallOrderFee + couvert + tip - discount
@@ -37472,7 +37562,7 @@ function uppercasePrintTextChunks(data) {
   return data.map((chunk) => {
     if (typeof chunk !== "string") return chunk;
     if (chunk.includes(CMD.ESC) || chunk.includes(CMD.GS)) return chunk;
-    return chunk.toUpperCase();
+    return chunk.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[\u2012-\u2015]/g, "-").toUpperCase();
   });
 }
 function getReceiptGeometry(settings = getPrintSettings(), font = getReceiptFontFamily(settings.fontSize)) {
@@ -37552,35 +37642,15 @@ function pushReceiptSectionTitle(data, settings, title) {
   const text = normalizeText2(title).replace(/\s+/g, " ").trim().toUpperCase();
   if (!text) return;
   applyReceiptFont(data, settings, "A");
-  data.push(CMD.ALIGN_CENTER, CMD.INVERSE_OFF, CMD.TXT_NORMAL, CMD.medium_ON);
+  data.push(CMD.ALIGN_CENTER, CMD.INVERSE_OFF, CMD.TXT_NORMAL, EMPH_ON);
   wrapReceiptText(text, cols).forEach((line) => data.push(`${line}
 `));
-  data.push(CMD.medium_OFF);
+  data.push(EMPH_OFF);
   applyReceiptTextStyle(data, settings);
   data.push(CMD.ALIGN_LEFT);
 }
 function pushPromotionBanner(data, settings, title) {
   pushReceiptBand(data, settings, title, {});
-}
-function pushTableBand(data, settings, label, large = false) {
-  const cols = getReceiptGeometry(settings, "A").contentColumns;
-  const text = normalizeText2(label).replace(/\s+/g, " ").trim().toUpperCase();
-  if (!text) return;
-  applyReceiptFont(data, settings, "A");
-  data.push(CMD.ALIGN_CENTER, CMD.INVERSE_OFF, CMD.TXT_NORMAL, EMPH_ON);
-  if (large) {
-    const big = text.length * 2 <= cols;
-    data.push(big ? CMD.TXT_BIG : CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A);
-    wrapReceiptText(text, big ? Math.floor(cols / 2) : cols).forEach((line) => data.push(`${line}
-`));
-    data.push(CMD.TXT_NORMAL);
-  } else {
-    wrapReceiptText(text, cols).forEach((line) => data.push(`${line}
-`));
-  }
-  data.push(EMPH_OFF);
-  applyReceiptTextStyle(data, settings);
-  data.push(CMD.ALIGN_LEFT);
 }
 var EMPH_ON = "\x1B\x7F+";
 var EMPH_OFF = "\x1B\x7F-";
@@ -37649,7 +37719,7 @@ function applyReceiptMargins(data, settings) {
     if (latestWidthIndex >= 0) {
       widthMultiplier = latestWidthIndex === tripleWidthIndex ? 3 : latestWidthIndex === doubleWidthIndex ? 2 : 1;
     }
-    if (chunk.includes(CMD.ESC) || chunk.includes(CMD.GS)) return chunk;
+    if (chunk.includes(CMD.ESC) || chunk.includes(CMD.GS)) return restorePiecesSuffixSpace(chunk);
     const maxTextColumns = Math.max(1, Math.floor(geometry.contentColumns / widthMultiplier));
     const parts = chunk.split("\n");
     const transformed = [];
@@ -37679,7 +37749,7 @@ function applyReceiptMargins(data, settings) {
         transformed.push(value);
       });
     });
-    return transformed.join("\n");
+    return restorePiecesSuffixSpace(transformed.join("\n"));
   });
 }
 var PRINT_TIMEZONE = "America/Sao_Paulo";
@@ -37725,26 +37795,6 @@ function isCasaDaPizzaOrder(order) {
   const storeId = [order == null ? void 0 : order.admin_client_id, order == null ? void 0 : order.adminClientId, order == null ? void 0 : order.store_id, order == null ? void 0 : order.storeId].map((value) => String(value || "").trim()).find(Boolean);
   return storeId === CASA_DA_PIZZA_ADMIN_CLIENT_ID;
 }
-function pushDarkReceiptBand(data, settings, label) {
-  const geometry = getReceiptGeometry(settings, "A");
-  const cols = geometry.contentColumns;
-  const text = normalizeText2(label).replace(/\s+/g, " ").trim().toUpperCase();
-  if (!text) return;
-  const gutter = " ".repeat(geometry.softwareLeftGutterColumns);
-  applyReceiptFont(data, settings, "A");
-  data.push(CMD.ALIGN_LEFT, CMD.TXT_NORMAL);
-  wrapReceiptText(text, cols).forEach((line) => {
-    const free = Math.max(0, cols - line.length);
-    const left = Math.floor(free / 2);
-    const padded = `${" ".repeat(left)}${line}${" ".repeat(free - left)}`;
-    data.push(
-      `${gutter}${CMD.INVERSE_ON}${CMD.TXT_DOUBLE_H}${TALL_LINE_SPACING_A}${EMPH_ON}${padded}${EMPH_OFF}${CMD.TXT_NORMAL}${CMD.INVERSE_OFF}
-`
-    );
-  });
-  applyReceiptTextStyle(data, settings);
-  data.push(CMD.ALIGN_LEFT);
-}
 function normalizePrintStoreName(value) {
   return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
@@ -37763,14 +37813,6 @@ function isExpressoLanchesOrder(order, settings) {
   );
   return storeName === "expresso lanches";
 }
-function pushExpressoOrderNumberSize(data, order, settings) {
-  if (!isExpressoLanchesOrder(order, settings)) return false;
-  data.push(CMD.TXT_DOUBLE_H);
-  return true;
-}
-function popExpressoOrderNumberSize(data, expanded) {
-  if (expanded) data.push(CMD.TXT_NORMAL);
-}
 function formatStoreOrderPrintLabel(order, fallback = "\u2014") {
   const offlineId = getOfflineOrderDisplayId(order);
   if (offlineId) return offlineId;
@@ -37780,7 +37822,13 @@ function formatStoreOrderPrintLabel(order, fallback = "\u2014") {
   }
   return formatOrderNumber(order, fallback);
 }
+function shortenPrintedCardLabel(value) {
+  return String(value || "").replace(/\bcart[aã]o\s+(?:de\s+)?(cr[eé]dito|d[eé]bito)\b/gi, "$1").replace(/\s+/g, " ").trim();
+}
 function formatPaymentMethodForPrint(order, fallback = "Pagamento") {
+  return shortenPrintedCardLabel(formatPaymentMethodForPrintRaw(order, fallback));
+}
+function formatPaymentMethodForPrintRaw(order, fallback = "Pagamento") {
   const raw = String((order == null ? void 0 : order.payment_method) || (order == null ? void 0 : order.paymentMethod) || fallback || "").trim();
   const normalized = raw.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
   if (normalized === "pending" || normalized === "pendente") {
@@ -38055,8 +38103,7 @@ function wrapCompactPrintEntries(entries, width) {
   return lines;
 }
 function formatPrintedFlavorSharePrefix(count) {
-  if (count <= 0) return "";
-  if (count === 1) return "1 ";
+  if (count <= 1) return "";
   if (count === 2) return "1/2 ";
   if (count === 3) return "1/3 ";
   return `1/${count} `;
@@ -38074,13 +38121,17 @@ function getPrintedPizzaTotalPieces(item) {
   const total = Number(match[1]);
   return Number.isFinite(total) && total > 0 ? total : null;
 }
-function formatPrintedFlavorSharePrefixForItem(item, count) {
+var PIECES_SUFFIX_SPACE = "`";
+function restorePiecesSuffixSpace(text) {
+  return text.replace(/\((\d+)`PED\)/g, "($1 PED)");
+}
+function formatPrintedFlavorShareForItem(item, count) {
   const fraction = formatPrintedFlavorSharePrefix(count);
   const totalPieces = getPrintedPizzaTotalPieces(item);
-  if (!totalPieces || count <= 1) return fraction;
+  if (!totalPieces || count <= 1) return { fraction, piecesSuffix: "" };
   const piecesPerFlavor = totalPieces / count;
-  if (!Number.isInteger(piecesPerFlavor) || piecesPerFlavor <= 0) return fraction;
-  return `${fraction}[${piecesPerFlavor}] `;
+  if (!Number.isInteger(piecesPerFlavor) || piecesPerFlavor <= 0) return { fraction, piecesSuffix: "" };
+  return { fraction, piecesSuffix: ` (${piecesPerFlavor}${PIECES_SUFFIX_SPACE}PED)` };
 }
 function formatPrintedPizzaFlavorNameForKitchen(value) {
   return normalizeText2(value || "").replace(/\bC\s*\/\s*/g, "COM ").replace(/\s+/g, " ").trim();
@@ -38095,12 +38146,13 @@ function getPrintedPizzaFlavorDescription(flavor) {
 function getPrintedPizzaSizeFromName(item) {
   var _a;
   const sizeWord = /\b(grande|media|medio|pequena|familia|familiar|brotinho|broto)\b/;
+  const names = [item == null ? void 0 : item.name, item == null ? void 0 : item.product_name, item == null ? void 0 : item.productName];
+  const hasExplicitPizzaMark = (item == null ? void 0 : item.isPizza) === true || (item == null ? void 0 : item.is_pizza) === true || [item == null ? void 0 : item.halfFlavors, item == null ? void 0 : item.half_flavors].some((value) => Array.isArray(value) && value.length > 0) || getTopLevelPrintedOptions(item).some(isPrintedPizzaSizeOption);
+  const isComboName = /^combo\b/.test(normalizeSizeCompare(names.filter(Boolean).join(" ")));
   const text = normalizeSizeCompare([
     item == null ? void 0 : item.sizeLabel,
     item == null ? void 0 : item.size,
-    item == null ? void 0 : item.name,
-    item == null ? void 0 : item.product_name,
-    item == null ? void 0 : item.productName
+    ...isComboName && !hasExplicitPizzaMark ? [] : names
   ].filter(Boolean).join(" "));
   const match = text.match(sizeWord);
   if (match) return normalizePrintedSizeLabel(match[1]);
@@ -38118,6 +38170,31 @@ function getPrintedPizzaSizeFromOption(item) {
   if (!sizeOption) return null;
   const optionName = getPrintedOptionDisplayName(sizeOption);
   return optionName ? normalizePrintedSizeLabel(optionName) : null;
+}
+function formatPrintedWeight(grams) {
+  if (grams < 1e3) return `${grams}G`;
+  return `${`${Number((grams / 1e3).toFixed(3))}`.replace(".", ",")}KG`;
+}
+function formatEstimatedTimeForPrint(value) {
+  const text = String(value || "").replace(/\s*[\u2012-\u2015-]\s*/g, " a ");
+  const match = text.match(/^\s*(\d+)(?:\s+a\s+(\d+))?\s*min(?:utos)?\s*$/i);
+  if (!match) return normalizeText2(text);
+  const values = [Number(match[1]), match[2] ? Number(match[2]) : null].filter((v) => v !== null);
+  if (values[0] < 60 && values.every((v) => v <= 60)) return `${values.join(" A ")} MIN`;
+  const hours = (minutes) => {
+    if (minutes < 60) return `${minutes} MIN`;
+    const h = Math.floor(minutes / 60);
+    const m = minutes % 60;
+    return m ? `${h}H${String(m).padStart(2, "0")}` : `${h}H`;
+  };
+  return values.map(hours).join(" A ");
+}
+function formatPrintedPhone(value) {
+  const raw = String(value || "").trim();
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 11) return `(${digits.slice(0, 2)}) ${digits.slice(2, 7)}-${digits.slice(7)}`;
+  if (digits.length === 10) return `(${digits.slice(0, 2)}) ${digits.slice(2, 6)}-${digits.slice(6)}`;
+  return raw;
 }
 function formatPaymentBannerText(label, maxCols) {
   const normalized = normalizeText2(label).toUpperCase();
@@ -38268,23 +38345,23 @@ function getPrintedComboChoiceLines(item, kitchen) {
     const isPizza = child.isPizza === true || child.is_pizza === true || flavors.length > 0;
     if (isPizza) {
       const heading = kitchen ? "PIZZA:" : "PIZZA";
-      lines.push(`${quantity}x ${heading}${sizeLabel ? ` ${normalizeText2(sizeLabel)}` : ""}`);
+      lines.push({ text: `${quantity}x ${heading}${sizeLabel ? ` ${normalizeText2(sizeLabel)}` : ""}`, level: 0 });
       const printableFlavors = flavors.length > 0 ? flavors : [child.name || child.product_name].filter(Boolean);
-      const fraction = formatPrintedFlavorSharePrefixForItem(child, printableFlavors.length);
+      const { fraction, piecesSuffix } = formatPrintedFlavorShareForItem(child, printableFlavors.length);
       printableFlavors.forEach((flavor) => {
         const name2 = typeof flavor === "string" ? flavor : flavor.name || flavor.product_name || flavor.productName;
-        if (name2) lines.push(`${fraction}${normalizeText2(name2)}`);
+        if (name2) lines.push({ text: `${fraction}${normalizeText2(name2)}${piecesSuffix}`, level: 1 });
       });
       const border = getPrintedBorderName(child);
-      if (border) lines.push(`BORDA: ${normalizeText2(border)}`);
+      if (border) lines.push({ text: `# BORDA: ${normalizeText2(border)} #`, level: 1 });
       const notes2 = String(child.notes || child.observations || child.obs || "").trim();
-      if (notes2) lines.push(`OBS: ${normalizeText2(notes2)}`);
+      if (notes2) lines.push({ text: `OBS: ${normalizeText2(notes2)}`, level: 1 });
       continue;
     }
     const name = child.name || child.product_name || child.productName;
-    if (name) lines.push(`${quantity}x ${normalizeText2(name)}`);
+    if (name) lines.push({ text: `${quantity}x ${normalizeText2(name)}`, level: 0 });
     const notes = String(child.notes || child.observations || child.obs || "").trim();
-    if (notes) lines.push(`OBS: ${normalizeText2(notes)}`);
+    if (notes) lines.push({ text: `OBS: ${normalizeText2(notes)}`, level: 1 });
   }
   return lines;
 }
@@ -38443,13 +38520,14 @@ function parseOptionalPrintDate(value) {
 }
 function getOrderScheduledPrintDate(order) {
   const cd = (order == null ? void 0 : order.customData) || (order == null ? void 0 : order.custom_data) || {};
+  const ignoresScheduledDatetime = Boolean(cd == null ? void 0 : cd.orderTiming) && cd.orderTiming !== "SCHEDULED";
   const candidates = [
     order == null ? void 0 : order.scheduled_at,
     order == null ? void 0 : order.scheduledAt,
     cd == null ? void 0 : cd.scheduled_at,
     cd == null ? void 0 : cd.scheduledAt,
-    cd == null ? void 0 : cd.scheduled_datetime,
-    cd == null ? void 0 : cd.scheduledDatetime
+    ignoresScheduledDatetime ? null : cd == null ? void 0 : cd.scheduled_datetime,
+    ignoresScheduledDatetime ? null : cd == null ? void 0 : cd.scheduledDatetime
   ];
   for (const candidate of candidates) {
     const parsed = parseOptionalPrintDate(candidate);
@@ -38474,7 +38552,7 @@ function getParsedPaymentSplits(order) {
 }
 function formatPaymentSplitMethodForPrint(split) {
   var _a, _b, _c, _d;
-  return ((_b = (_a = split.method_name) == null ? void 0 : _a.trim) == null ? void 0 : _b.call(_a)) || ((_d = (_c = split.methodName) == null ? void 0 : _c.trim) == null ? void 0 : _d.call(_c)) || getPaymentMethodLabel(split.method_id || split.methodId) || split.method_id || split.methodId || "";
+  return shortenPrintedCardLabel(((_b = (_a = split.method_name) == null ? void 0 : _a.trim) == null ? void 0 : _b.call(_a)) || ((_d = (_c = split.methodName) == null ? void 0 : _c.trim) == null ? void 0 : _d.call(_c)) || getPaymentMethodLabel(split.method_id || split.methodId) || split.method_id || split.methodId || "");
 }
 function getCustomerOrdersCount(order) {
   var _a, _b, _c, _d, _e, _f;
@@ -38559,42 +38637,67 @@ function formatReceiptItemRowsBase(label, right, width) {
   const { quantity, description } = splitReceiptItemLabel(label);
   const rightText = String(right || "").trim();
   if (isCompactReceiptGrid(width)) {
-    const qty = normalizeText2(quantity).replace(/\s+/g, " ").trim();
-    const desc = normalizeText2(description).replace(/\s+/g, " ").trim();
-    const text = `${qty}${qty && desc ? " " : ""}${desc}`;
+    const qty2 = normalizeText2(quantity).replace(/\s+/g, " ").trim();
+    const desc2 = normalizeText2(description).replace(/\s+/g, " ").trim();
+    const text = `${qty2}${qty2 && desc2 ? " " : ""}${desc2}`;
     if (rightText && text.length + 1 + rightText.length <= width) return [padPair(text, rightText, width).replace(/\n$/, "")];
-    const lead = qty && qty.length <= 6 ? qty.length + 1 : 0;
+    const lead = qty2 && qty2.length <= 6 ? qty2.length + 1 : 0;
     const firstWidth = rightText ? width - lead - rightText.length - 1 : width - lead;
     if (lead && firstWidth >= 10) {
-      const words = desc.split(" ");
+      const words = desc2.split(" ");
       let first = "";
       while (words.length && `${first}${first ? " " : ""}${words[0]}`.length <= firstWidth) {
         first = `${first}${first ? " " : ""}${words.shift()}`;
       }
       if (first) {
-        const head = rightText ? padPair(`${qty} ${first}`, rightText, width).replace(/\n$/, "") : `${qty} ${first}`;
+        const head = rightText ? padPair(`${qty2} ${first}`, rightText, width).replace(/\n$/, "") : `${qty2} ${first}`;
         const rest = words.length ? wrapReceiptColumnText(words.join(" "), Math.max(8, width - lead)).map((line) => `${" ".repeat(lead)}${line}`) : [];
         return [head, ...rest];
       }
     }
-    const rows = lead ? wrapReceiptColumnText(desc, Math.max(8, width - lead)).map((line, index) => `${index === 0 ? `${qty} ` : " ".repeat(lead)}${line}`) : wrapReceiptColumnText(text, width);
+    const rows = lead ? wrapReceiptColumnText(desc2, Math.max(8, width - lead)).map((line, index) => `${index === 0 ? `${qty2} ` : " ".repeat(lead)}${line}`) : wrapReceiptColumnText(text, width);
     return rightText ? [...rows, rightText.slice(-width).padStart(width, " ")] : rows;
   }
   const grid = resolveReceiptItemGrid(
     { contentColumns: width },
     { showTotal: Boolean(rightText) }
   );
+  const qty = String(quantity || "").trim();
+  const desc = normalizeText2(description).replace(/\s+/g, " ").trim();
+  if (grid.showTotal && qty.length <= grid.quantityWidth && desc.length > grid.itemWidth && rightText.length <= grid.totalWidth) {
+    const words = desc.split(" ");
+    let first = "";
+    while (words.length && `${first}${first ? " " : ""}${words[0]}`.length <= grid.itemWidth) {
+      first = `${first}${first ? " " : ""}${words.shift()}`;
+    }
+    if (first) {
+      const head = `${qty.padEnd(grid.quantityWidth)}${" ".repeat(grid.gapWidth)}${first.padEnd(grid.itemWidth)}${" ".repeat(grid.gapWidth)}${rightText.padStart(grid.totalWidth)}`;
+      const rest = words.length ? wrapReceiptColumnText(words.join(" "), Math.max(8, width - grid.descriptionStart)).map((line) => `${" ".repeat(grid.descriptionStart)}${line}`) : [];
+      return [head, ...rest];
+    }
+  }
   return formatReceiptItemRows({
     quantity,
     description,
     total: rightText
   }, grid).map((line) => line.replace(/\s+$/, ""));
 }
+var RECEIPT_DETAIL_HANGING_PREFIX = /^(\+ (?:\d+(?:[.,]\d+)?X )?|\d+(?:[.,]\d+)?X |(?:>> )?OBS: |\d+\/\d+ (?:\[\d+\] )?|# )/i;
 function formatReceiptDetailRows(text, width, extraIndent = 0) {
+  var _a;
   const grid = getReceiptGridLayout(width);
   const nestedIndent = Math.max(0, extraIndent);
   const availableWidth = Math.max(8, width - grid.itemStart - nestedIndent);
-  const lines = wrapReceiptColumnText(text, availableWidth);
+  let lines = wrapReceiptColumnText(text, availableWidth);
+  const normalized = normalizeText2(text).replace(/\s+/g, " ").trim();
+  const hanging = (((_a = normalized.match(RECEIPT_DETAIL_HANGING_PREFIX)) == null ? void 0 : _a[0]) || "").length;
+  if (hanging && lines.length > 1 && normalized.startsWith(lines[0])) {
+    const rest = normalized.slice(lines[0].length).trim();
+    lines = [
+      lines[0],
+      ...wrapReceiptColumnText(rest, Math.max(8, availableWidth - hanging)).map((line) => `${" ".repeat(hanging)}${line}`)
+    ];
+  }
   const prefix = " ".repeat(grid.itemStart + nestedIndent);
   return lines.map((line) => `${prefix}${line}`.replace(/\s+$/, ""));
 }
@@ -38644,6 +38747,17 @@ function stepRepeatsItemName(itemLine, choices) {
   const pieces = choices.map((choice) => normalizeText2(choice).toUpperCase().replace(/\s+/g, " ").replace(/^\d+(?:[.,]\d+)?X\s+/, "").trim()).filter(Boolean);
   return Boolean(line) && pieces.length > 0 && pieces.every((piece) => line.includes(piece));
 }
+function printItemsWithDetailSeparators(data, items, separator, printItem) {
+  let previousHasDetails = false;
+  items.forEach((item, index) => {
+    const start = data.length;
+    printItem(item);
+    const printedLines = data.slice(start).reduce((sum, chunk) => typeof chunk === "string" && !chunk.includes(CMD.ESC) && !chunk.includes(CMD.GS) ? sum + (chunk.match(/\n/g) || []).length : sum, 0);
+    const hasDetails = printedLines > 1;
+    if (index > 0 && (previousHasDetails || hasDetails)) data.splice(start, 0, separator);
+    previousHasDetails = hasDetails;
+  });
+}
 function categoryRepeatsItemNames(category, items) {
   const cat = normalizeText2(category);
   return Boolean(cat) && items.length > 0 && items.every((item) => {
@@ -38679,6 +38793,16 @@ function formatReceiptLabeledRows(label, value, width) {
   }
   return [labelText, ...wrapReceiptColumnText(valueText, width)];
 }
+function formatReceiptLabeledRowsInline(label, value, width) {
+  const labelText = normalizeText2(label).trim();
+  const paragraphs = normalizeText2(value).split(/\n+/).map((part) => part.trim()).filter(Boolean);
+  if (!labelText && paragraphs.length === 0) return [];
+  if (paragraphs.length === 0) return wrapReceiptColumnText(labelText, width);
+  const prefix = `${labelText} `;
+  const inlineWidth = width - prefix.length;
+  if (inlineWidth < 8) return [labelText, ...paragraphs.flatMap((part) => wrapReceiptColumnText(part, width))];
+  return paragraphs.flatMap((part) => wrapReceiptColumnText(part, inlineWidth)).map((line, index) => `${index === 0 ? prefix : " ".repeat(prefix.length)}${line}`);
+}
 function normalizeText2(text) {
   if (!text) return "";
   const str = String(text);
@@ -38700,8 +38824,42 @@ function getPrintableItemObservation(item) {
   }
   return "";
 }
-function orderNumberSize(text, settings) {
-  return String(text || "").length * 2 <= getReceiptGeometry(settings, "A").contentColumns ? CMD.TXT_BIG : CMD.TXT_DOUBLE_H;
+var KITCHEN_EXTRA_LINE_KEYS = [
+  "showWaiterLine",
+  "showOperatorLine",
+  "showOriginLine",
+  "showLocationLine",
+  "showNeighborhoodLine",
+  "showEstimateLine",
+  "showCustomerOrdersLine",
+  "showMarketplaceCodesLine"
+];
+function getKitchenExtraLines(source) {
+  const raw = source && typeof source === "object" ? source : {};
+  return Object.fromEntries(KITCHEN_EXTRA_LINE_KEYS.map((key) => [key, raw[key] === true]));
+}
+function pushOrderHeadline(data, settings, typeLabel, orderLabel) {
+  const headline = [normalizeText2(typeLabel).replace(/\s+/g, " ").trim().toUpperCase(), normalizeText2(orderLabel)].filter(Boolean).join(" ");
+  if (!headline) return;
+  const cols = getReceiptGeometry(settings, "A").contentColumns;
+  const big = headline.length * 2 <= cols;
+  applyReceiptFont(data, settings, "A");
+  data.push(CMD.ALIGN_CENTER, CMD.INVERSE_OFF, big ? CMD.TXT_BIG : CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A, EMPH_ON);
+  wrapReceiptText(headline, big ? Math.floor(cols / 2) : cols).forEach((line) => data.push(`${line}
+`));
+  data.push(EMPH_OFF, CMD.TXT_NORMAL);
+  applyReceiptTextStyle(data, settings);
+}
+function pushScheduledHeadline(data, settings, orderType, scheduledDate) {
+  if (!scheduledDate) return;
+  const text = `${orderType === "delivery" ? "ENTREGAR" : "RETIRAR"} ${formatTimeBR(scheduledDate)} - ${formatDateBR(scheduledDate).slice(0, 5)}`;
+  const cols = getReceiptGeometry(settings, "A").contentColumns;
+  applyReceiptFont(data, settings, "A");
+  data.push(CMD.ALIGN_CENTER, CMD.INVERSE_OFF, CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A, EMPH_ON);
+  wrapReceiptText(text, cols).forEach((line) => data.push(`${line}
+`));
+  data.push(EMPH_OFF, CMD.TXT_NORMAL);
+  applyReceiptTextStyle(data, settings);
 }
 function generateKitchenPrintData(order, options = {}) {
   var _a, _b, _c, _d, _e;
@@ -38709,7 +38867,6 @@ function generateKitchenPrintData(order, options = {}) {
   const isBarSector = options.sector === "bar";
   const baseSettings = options.settings || getPrintSettings();
   const settings = getPrintSettingsForType(isBarSector ? "bar" : "kitchen", baseSettings);
-  const geometry = getReceiptGeometry(settings);
   const cols = getKitchenPrinterCols(settings);
   const separator = "-".repeat(cols) + "\n";
   const separatorFine = separator;
@@ -38740,7 +38897,7 @@ function generateKitchenPrintData(order, options = {}) {
     }
     return source.replace(/[_-]+/g, " ");
   };
-  const fmtMoney = (val) => (val || 0).toFixed(2).replace(".", ",");
+  const fmtMoney = (val) => (val || 0).toFixed(2).replace(".", ",").replace(/\B(?=(\d{3})+(?!\d))(?=.*,)/g, ".");
   const restoreReceiptTextStyle = () => {
     applyReceiptTextStyle(data, settings);
   };
@@ -38821,7 +38978,8 @@ function generateKitchenPrintData(order, options = {}) {
       const hasPromotion = Boolean(item.promotionName || item.promotion_name || item.promotionId || item.promotion_id);
       const hasWeight = item.unitType === "weight" || Number(item.weight || 0) > 0;
       const hasDetails = Boolean(
-        item.isMarmita || Array.isArray(item.marmitaSelections) && item.marmitaSelections.length > 0 || Array.isArray(item.additions) && item.additions.length > 0 || getPrintedOptionChildren(item).length > 0 || Array.isArray(item.flavors) && item.flavors.length > 0 || Array.isArray(item.pizzaCustomizations) && item.pizzaCustomizations.length > 0 || getPrintableItemObservation(item) || getPrintedBorderName(item)
+        item.isMarmita || Array.isArray(item.marmitaSelections) && item.marmitaSelections.length > 0 || Array.isArray(item.additions) && item.additions.length > 0 || getPrintedOptionChildren(item).length > 0 || Array.isArray(item.flavors) && item.flavors.length > 0 || Array.isArray(item.pizzaCustomizations) && item.pizzaCustomizations.length > 0 || getPrintableItemObservation(item) || getPrintedBorderName(item) || // Combo, adicionais, extras etc.: mesma regra da consolidação da tela.
+        !isSimpleMergeableOrderItem(item)
       );
       if (hasPromotion || hasWeight || hasDetails) {
         merged.push(item);
@@ -38847,12 +39005,17 @@ function generateKitchenPrintData(order, options = {}) {
     return merged;
   };
   const beverageNamePattern = /\b(coca|guarana|pepsi|fanta|sprite|suco|agua|agua|cerveja|refrigerante|bebida|drink|caipirinha)\b/i;
-  const isObviouslyBeverage = (item) => isBeverageCategory(getPrintItemCategory(item)) || beverageNamePattern.test(String((item == null ? void 0 : item.name) || (item == null ? void 0 : item.product_name) || (item == null ? void 0 : item.productName) || ""));
+  const isObviouslyBeverage = (item) => {
+    const category = getPrintItemCategory(item);
+    if (category && !looksLikeTechnicalId(category)) return isBeverageCategory(category);
+    return beverageNamePattern.test(String((item == null ? void 0 : item.name) || (item == null ? void 0 : item.product_name) || (item == null ? void 0 : item.productName) || ""));
+  };
   const kitchenItems = settings.highlightBeverages ? itemsCozinha : itemsCozinha.filter((item) => !isObviouslyBeverage(item));
   const mergedItemsCozinha = mergeKitchenItems(kitchenItems);
   const mergedItemsBebida = mergeKitchenItems(itemsBebida);
   const sectorItems = isBarSector ? mergedItemsBebida : mergedItemsCozinha;
-  const shouldPrintKitchenBeverageSection = !isBarSector && !baseSettings.barPrintEnabled && settings.highlightBeverages && mergedItemsBebida.length > 0 && orderType === "delivery";
+  const isPickupOrderType = ["balcao", "retirada", "pickup", "takeout", "takeaway"].includes(orderType);
+  const shouldPrintKitchenBeverageSection = !isBarSector && !baseSettings.barPrintEnabled && settings.highlightBeverages && mergedItemsBebida.length > 0 && (orderType === "delivery" || orderType === "mesa" || isPickupOrderType && sectorItems.length > 0);
   if (sectorItems.length === 0 && !shouldPrintKitchenBeverageSection) {
     return [];
   }
@@ -38861,7 +39024,8 @@ function generateKitchenPrintData(order, options = {}) {
   restoreReceiptTextStyle();
   const orderNum = String(order.order_number || order.orderNumber || order.id || "0").padStart(3, "0");
   const offlineDisplayId = getOfflineOrderDisplayId(order);
-  const displayId = isIfood ? (cd == null ? void 0 : cd.displayId) || order.displayId || order.display_id || orderNum : isNinetyNine ? (cd == null ? void 0 : cd.order_index) || (cd == null ? void 0 : cd.ninetyNineOrderId) || order.external_id || order.externalId || orderNum : offlineDisplayId || orderNum;
+  const aiqfomeFallbackNumber = isAiqfome && !(order.order_number || order.orderNumber) && (cd == null ? void 0 : cd.aiqfomeDisplayNumber) ? String(cd.aiqfomeDisplayNumber) : "";
+  const displayId = isIfood ? (cd == null ? void 0 : cd.displayId) || order.displayId || order.display_id || orderNum : isNinetyNine ? (cd == null ? void 0 : cd.order_index) || (cd == null ? void 0 : cd.ninetyNineOrderId) || order.external_id || order.externalId || orderNum : offlineDisplayId || aiqfomeFallbackNumber || orderNum;
   const hasCustomerName = !["", "cliente", "consumidor"].includes(String(order.customer_name || order.customerName || "").trim().toLowerCase());
   const cName = normalizeText2(order.customer_name || order.customerName || "Cliente").toUpperCase();
   const scheduledDate = getOrderScheduledPrintDate(order);
@@ -38889,12 +39053,12 @@ function generateKitchenPrintData(order, options = {}) {
   }
   const rawHeaderOrderLabel = normalizeText2(String(headerOrderLabel || "").trim());
   const headerPedidoLabel = rawHeaderOrderLabel ? rawHeaderOrderLabel.startsWith("#") || rawHeaderOrderLabel.startsWith("PH-") ? rawHeaderOrderLabel : `#${rawHeaderOrderLabel}` : "";
-  const kitchenViaLabel = `VIA:${getKitchenPrintViaNumber()}`;
-  let kitchenTypeLabel = normalizeText2(tipoLabel);
-  if (isBarSector) kitchenTypeLabel = "BAR/BEBIDAS";
-  else if (isIfood) kitchenTypeLabel = "IFOOD";
-  else if (isNinetyNine) kitchenTypeLabel = "99FOOD";
-  else if (isAiqfome) kitchenTypeLabel = "AIQFOME";
+  const kitchenViaNumber = getKitchenPrintViaNumber();
+  const kitchenViaLine = [
+    isBarSector ? "BAR/BEBIDAS" : "",
+    isIfood ? "IFOOD" : isNinetyNine ? "99FOOD" : isAiqfome ? "AIQFOME" : "",
+    kitchenViaNumber > 1 ? `VIA:${kitchenViaNumber}` : ""
+  ].filter(Boolean).join(" - ");
   data.push(CMD.ALIGN_CENTER);
   restoreReceiptTextStyle();
   if (baseSettings.showStoreName && baseSettings.storeName) {
@@ -38907,28 +39071,18 @@ function generateKitchenPrintData(order, options = {}) {
     restoreReceiptTextStyle();
   }
   const showKitchenOrderNumber = isBarSector || ((_e = settings.kitchenSettings) == null ? void 0 : _e.showOrderNumber) !== false;
-  if (headerPedidoLabel && showKitchenOrderNumber) {
-    data.push(CMD.INVERSE_OFF, orderNumberSize(`PEDIDO ${headerPedidoLabel}`, settings), EMPH_ON);
-    data.push(`PEDIDO ${headerPedidoLabel}
+  pushOrderHeadline(
+    data,
+    settings,
+    tipoLabel || "MESA",
+    showKitchenOrderNumber ? headerPedidoLabel : ""
+  );
+  pushScheduledHeadline(data, settings, orderType, scheduledDate);
+  data.push(CMD.ALIGN_CENTER);
+  if (kitchenViaLine) data.push(`${kitchenViaLine}
 `);
-    data.push(EMPH_OFF, CMD.TXT_NORMAL);
-  }
-  restoreReceiptTextStyle();
-  if (orderType === "mesa" && !isIfood && !isNinetyNine && !isAiqfome) {
-    pushTableBand(data, settings, tipoLabel || "MESA", true);
-    data.push(CMD.ALIGN_CENTER);
-    data.push(`${isBarSector ? `${kitchenTypeLabel} - ` : ""}${kitchenViaLabel}
+  data.push(`CRIADO EM: ${formatDateTimeBR(parseOrderDate(order.created_at || order.createdAt))}
 `);
-  } else {
-    pushTableBand(data, settings, kitchenTypeLabel);
-    data.push(CMD.ALIGN_CENTER);
-    data.push(`${kitchenViaLabel}
-`);
-  }
-  if (settings.showDateTime) {
-    data.push(`CRIADO EM: ${formatDateTimeBR(parseOrderDate(order.created_at || order.createdAt))}
-`);
-  }
   data.push(CMD.ALIGN_LEFT);
   data.push(separator);
   data.push(CMD.ALIGN_LEFT);
@@ -38936,72 +39090,143 @@ function generateKitchenPrintData(order, options = {}) {
     pushMediumOn(settings.mediumItems);
     pushKitchenPair("CLIENTE:", cName);
     pushMediumOff(settings.mediumItems);
-    data.push(separatorFine);
   }
   if (settings.showDateTime) {
     pushKitchenPair("IMPRESSAO:", formatDateTimeBR(/* @__PURE__ */ new Date()));
   }
   data.push(CMD.ALIGN_LEFT);
   pushMediumOn(settings.mediumItems);
-  if (scheduledDate) {
-    pushKitchenPair("AGENDADO:", `${formatDateBR(scheduledDate)} AS ${formatTimeBR(scheduledDate)}`);
-  }
   const deliveryTimeStr = cd == null ? void 0 : cd.expectedDeliveryTime;
-  if (settings.showDateTime && deliveryTimeStr) {
+  if (deliveryTimeStr && !scheduledDate) {
     const dt = safeDate(deliveryTimeStr);
     const dtHour = formatTimeBR(dt);
     pushKitchenPair("ENTREGAR:", dtHour);
   }
-  const etaText = (cd == null ? void 0 : cd.estimated_time_text) || (cd == null ? void 0 : cd.estimatedTimeText);
-  if (settings.showDeliveryInfo && etaText) {
-    const etaLabel = orderType === "delivery" ? "PRAZO ENTREGA" : "PRAZO";
-    pushKitchenPair(`${etaLabel}:`, String(etaText));
+  const extraLines = getKitchenExtraLines(settings.kitchenSettings);
+  const waiterName = order.waiter_name || order.waiterName;
+  if (extraLines.showWaiterLine && orderType === "mesa" && waiterName) {
+    pushKitchenPair("GARCOM:", waiterName);
   }
   const operatorName = order.operator_name || order.operatorName || order.mesa_operator || order.mesaOperator;
-  if (settings.showOperator && operatorName) {
+  if (extraLines.showOperatorLine && operatorName) {
     pushKitchenPair("OPERADOR:", operatorName);
   }
-  pushKitchenPair("ORIGEM:", getKitchenOriginLabel());
-  if (normalizeText2(kitchenLocationLabel).toUpperCase() !== normalizeText2(tipoLabel).toUpperCase()) {
+  if (extraLines.showOriginLine) {
+    pushKitchenPair("ORIGEM:", getKitchenOriginLabel());
+  }
+  if (extraLines.showLocationLine && normalizeText2(kitchenLocationLabel).toUpperCase() !== normalizeText2(tipoLabel).toUpperCase()) {
     pushKitchenPair("LOCAL:", kitchenLocationLabel);
   }
   const neighborhood = normalizeText2(
     order.neighborhood || order.customerNeighborhood || order.customer_neighborhood || (cd == null ? void 0 : cd.neighborhood) || (cd == null ? void 0 : cd.customerNeighborhood) || (cd == null ? void 0 : cd.customer_neighborhood) || ""
   );
-  if (settings.showDeliveryInfo && orderType === "delivery" && neighborhood) {
+  if (extraLines.showNeighborhoodLine && orderType === "delivery" && neighborhood) {
     pushKitchenPair("BAIRRO:", neighborhood);
   }
+  const etaText = (cd == null ? void 0 : cd.estimated_time_text) || (cd == null ? void 0 : cd.estimatedTimeText);
+  if (extraLines.showEstimateLine && etaText) {
+    pushKitchenPair(orderType === "delivery" ? "PRAZO ENTREGA:" : "PRAZO:", formatEstimatedTimeForPrint(etaText));
+  }
   const customerOrdersCount = getCustomerOrdersCount(order);
-  if (settings.showCustomerInfo && customerOrdersCount !== null) {
+  if (extraLines.showCustomerOrdersLine && customerOrdersCount !== null) {
     pushKitchenPair("PEDIDOS DO CLIENTE:", customerOrdersCount);
   }
-  if (settings.showCustomerInfo && orderType === "mesa" && (order.waiter_name || order.waiterName)) {
-    pushKitchenPair("GARCOM:", order.waiter_name || order.waiterName);
-  }
-  if (isNinetyNine) {
+  if (isNinetyNine && extraLines.showMarketplaceCodesLine) {
     if (cd == null ? void 0 : cd.pickup_code) pushKitchenPair("COLETA:", cd.pickup_code);
-    if (cd == null ? void 0 : cd.handover_code) pushKitchenPair("ENTREGA:", cd.handover_code);
+    if (cd == null ? void 0 : cd.handover_code) pushKitchenPair("COD. ENTREGA:", cd.handover_code);
     if (cd == null ? void 0 : cd.locator) pushKitchenPair("LOCALIZADOR:", cd.locator);
   }
   pushMediumOff(settings.mediumItems);
   data.push(separator);
-  data.push(CMD.ALIGN_CENTER);
+  const kitchenSupplementTitle = normalizeText2((cd == null ? void 0 : cd.kitchenSupplementTitle) || order.kitchenSupplementTitle || "");
+  if (kitchenSupplementTitle) {
+    data.push(CMD.ALIGN_CENTER);
+    data.push(CMD.medium_ON);
+    wrapReceiptColumnText(kitchenSupplementTitle, cols).forEach((line) => data.push(`${line}
+`));
+    data.push(CMD.medium_OFF);
+    restoreReceiptTextStyle();
+    data.push(CMD.ALIGN_LEFT);
+    data.push(separatorFine);
+  }
   data.push(CMD.medium_ON);
-  data.push(`${formatReceiptLine(
-    normalizeText2((cd == null ? void 0 : cd.kitchenSupplementTitle) || order.kitchenSupplementTitle || (isBarSector ? "===>>> BAR/BEBIDAS <<<===" : "===>>> DETALHE DO PEDIDO <<<===")),
-    geometry,
-    "center"
-  )}
+  data.push(`${kitchenRows(() => formatReceiptColumnHeader(cols, settings.showItemPrice ? "TOTAL" : void 0))}
 `);
   data.push(CMD.medium_OFF);
-  restoreReceiptTextStyle();
   data.push(CMD.ALIGN_LEFT);
-  data.push(separatorFine);
-  data.push(CMD.medium_ON);
-  data.push(`${formatReceiptColumnHeader(cols, settings.showItemPrice ? "TOTAL" : void 0)}
-`);
-  data.push(CMD.medium_OFF);
-  data.push(CMD.ALIGN_LEFT);
+  const pushKitchenItemOptions = (item) => {
+    if (item.additions && item.additions.length > 0 && getPrintedOptionChildren(item).length === 0) {
+      pushKitchenBodyOn();
+      item.additions.filter((add) => !shouldSkipStructuredPizzaOption(item, add)).forEach((add) => {
+        const addName = normalizeText2(add.name || add);
+        const addQty = add.quantity || 1;
+        pushKitchenDetailLines(`+ ${addQty}x ${addName}`);
+      });
+      pushKitchenBodyOff();
+    }
+    const nestedOptions = getPrintedOptionChildren(item);
+    if (nestedOptions.length > 0) {
+      pushKitchenBodyOn();
+      const pushNestedOption = (opt, level, baseIndent) => {
+        if (shouldSkipStructuredPizzaOption(item, opt)) return;
+        const optName = normalizeText2(getPrintedOptionDisplayName(opt));
+        if (!optName) return;
+        const optQty = getPrintedOptionQuantity(item, opt, order);
+        pushKitchenDetailLines(`+ ${optQty}x ${optName}`, baseIndent + 2 * Math.max(0, level - 1));
+      };
+      const optionGroupLabel = (opt) => {
+        const label = normalizeText2(String(
+          (opt == null ? void 0 : opt.groupName) ?? (opt == null ? void 0 : opt.group_name) ?? (opt == null ? void 0 : opt.group) ?? (opt == null ? void 0 : opt.stepName) ?? (opt == null ? void 0 : opt.step_name) ?? (opt == null ? void 0 : opt.step) ?? ""
+        )).replace(/\s+/g, " ").trim();
+        if (!label || looksLikeTechnicalId(label)) return "";
+        if (label.toUpperCase() === getPrintedOptionGroupType(opt)) return "";
+        return label;
+      };
+      const blocks = [];
+      nestedOptions.forEach((opt) => {
+        const label = optionGroupLabel(opt);
+        const existing = label ? blocks.find((block) => block.label === label) : void 0;
+        if (existing) existing.options.push(opt);
+        else blocks.push({ label, options: [opt] });
+      });
+      blocks.forEach(({ label, options: options2 }) => {
+        if (!label) {
+          walkPrintedOptions(options2, (opt, level) => pushNestedOption(opt, level, 0));
+          return;
+        }
+        const printable = options2.filter((opt) => !shouldSkipStructuredPizzaOption(item, opt) && normalizeText2(getPrintedOptionDisplayName(opt)));
+        if (printable.length === 0) return;
+        const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const groupPrefix = new RegExp(`^${escapedLabel}\\s*[:-]\\s*`, "i");
+        const choiceOf = (opt) => {
+          const optName = normalizeText2(getPrintedOptionDisplayName(opt)).replace(/\s+/g, " ").trim();
+          return `${getPrintedOptionQuantity(item, opt, order)}x ${optName.replace(groupPrefix, "") || optName}`;
+        };
+        const hasChildren = printable.some((opt) => getPrintedOptionChildren(opt).length > 0);
+        if (!hasChildren) {
+          kitchenRows(() => formatReceiptStepRows(label, printable.map(choiceOf), kitchenItemCols)).forEach((line) => data.push(`${line}
+`));
+          return;
+        }
+        kitchenRows(() => formatReceiptStepRows(label, [], kitchenItemCols)).forEach((line) => data.push(`${line}
+`));
+        printable.forEach((opt) => {
+          pushKitchenDetailLines(`+ ${choiceOf(opt)}`, 2);
+          walkPrintedOptions(getPrintedOptionChildren(opt), (child, level) => pushNestedOption(child, level, 2), 2);
+        });
+      });
+      pushKitchenBodyOff();
+    }
+  };
+  const pushKitchenItemObservation = (item) => {
+    const itemObservation = getPrintableItemObservation(item);
+    if (settings.showItemNotes && itemObservation) {
+      pushKitchenBodyOn();
+      data.push(CMD.medium_ON);
+      pushKitchenDetailLines(`>> OBS: ${normalizeText2(itemObservation)}`);
+      pushKitchenBodyOff();
+    }
+  };
   const printKitchenItem = (item, categoryFallback = "") => {
     const qty = item.quantity || 1;
     let name = normalizeText2(item.product_name || item.productName || item.name || "Item");
@@ -39031,13 +39256,12 @@ function generateKitchenPrintData(order, options = {}) {
     }
     const weightVal = parseFloat(item.weight || 0);
     const isByWeight = item.unitType === "weight" || weightVal > 0;
-    let qtyStr = settings.showItemQuantity ? `${qty}x` : "";
-    if (settings.showItemQuantity && isByWeight) {
+    let qtyStr = `${qty}x`;
+    if (isByWeight) {
       const itemUnit = (item.unit || "").toLowerCase();
       const isCustomUnit = itemUnit && !["kg", "g", "l", "ml", "un"].includes(itemUnit);
       if (isCustomUnit) qtyStr = `${weightVal}${itemUnit}`;
-      else if (weightVal < 1e3) qtyStr = `${weightVal}g`;
-      else qtyStr = `${(weightVal / 1e3).toFixed(3).replace(".", ",")}kg`;
+      else qtyStr = formatPrintedWeight(weightVal);
     }
     const isComboChoiceMarmita = isComboChoiceMarmitaPrintItem(item);
     const isSelectionChoiceMarmita = isMarmitaSelectionChoiceItem(item);
@@ -39054,10 +39278,12 @@ function generateKitchenPrintData(order, options = {}) {
       if (isOrganizedPizzaBlock) pushKitchenPizzaBodyOff();
       else pushKitchenBodyOff();
     };
+    let kitchenItemLine = "";
     if (!isComboChoiceMarmita) {
-      const pizzaQtyPrefix = settings.showItemQuantity && qty > 1 ? `${qtyStr} ` : "";
+      const pizzaQtyPrefix = qty > 1 || !kitchenCompactGrid ? `${qtyStr} ` : "";
       const pizzaLabel = size ? `PIZZA: ${formatPrintedItemSize(size, { uppercase: true })}` : "PIZZA";
       const itemLine = isOrganizedPizzaBlock ? `${pizzaQtyPrefix}${pizzaLabel}` : `${comboChoiceMarmitaQtyPrefix}${printedNameHasSize(visibleItemName, size) ? "" : sizeStr}${visibleItemName}`;
+      kitchenItemLine = itemLine;
       pushKitchenPizzaBodyOn();
       kitchenRows(() => formatReceiptItemRows2(itemLine, priceText.trim() || void 0, kitchenItemCols)).forEach((line) => data.push(`${line}
 `));
@@ -39069,12 +39295,12 @@ function generateKitchenPrintData(order, options = {}) {
     }
     if (hasFlavors) {
       const count = flavorsArrK.length;
-      const fraction = formatPrintedFlavorSharePrefixForItem(item, count);
+      const { fraction, piecesSuffix } = formatPrintedFlavorShareForItem(item, count);
       if (isOrganizedPizzaBlock) pushKitchenPizzaBodyOn();
       else pushKitchenBodyOn();
       flavorsArrK.forEach((f) => {
         const fName = typeof f === "string" ? f : f.name || "";
-        pushKitchenDetailLines(`${fraction}${formatPrintedPizzaFlavorNameForKitchen(fName)}`);
+        pushKitchenDetailLines(`${fraction}${formatPrintedPizzaFlavorNameForKitchen(fName)}${piecesSuffix}`);
         if (settings.showPizzaFlavorDescriptions && isPizzaItemForFlavorDescriptions) {
           const flavorDescription = getPrintedPizzaFlavorDescription(f);
           if (flavorDescription) pushKitchenFlavorDescriptionLines(flavorDescription);
@@ -39086,33 +39312,13 @@ function generateKitchenPrintData(order, options = {}) {
     const comboChoices = getPrintedComboChoiceLines(item, true);
     if (comboChoices.length) {
       pushKitchenBodyOn();
-      comboChoices.forEach((choice) => pushKitchenDetailLines(choice));
+      comboChoices.forEach((choice) => pushKitchenDetailLines(choice.text, choice.level * 2));
       pushKitchenBodyOff();
     }
     if (!isOrganizedPizzaBlock) {
       pushKitchenBorder();
     }
-    if (item.additions && item.additions.length > 0 && getPrintedOptionChildren(item).length === 0) {
-      pushKitchenBodyOn();
-      item.additions.filter((add) => !shouldSkipStructuredPizzaOption(item, add)).forEach((add) => {
-        const addName = normalizeText2(add.name || add);
-        const addQty = add.quantity || 1;
-        pushKitchenDetailLines(`+ ${addQty}x ${addName}`);
-      });
-      pushKitchenBodyOff();
-    }
-    const nestedOptions = getPrintedOptionChildren(item);
-    if (nestedOptions.length > 0) {
-      pushKitchenBodyOn();
-      walkPrintedOptions(nestedOptions, (opt, level) => {
-        if (shouldSkipStructuredPizzaOption(item, opt)) return;
-        const optName = normalizeText2(getPrintedOptionDisplayName(opt));
-        if (!optName) return;
-        const optQty = getPrintedOptionQuantity(item, opt, order);
-        pushKitchenDetailLines(`+ ${optQty}x ${optName}`, 2 * Math.max(0, level - 1));
-      });
-      pushKitchenBodyOff();
-    }
+    pushKitchenItemOptions(item);
     if (Array.isArray(item.marmitaSelections) && item.marmitaSelections.length > 0) {
       const selectionsByStep = {};
       item.marmitaSelections.forEach((sel) => {
@@ -39130,11 +39336,12 @@ function generateKitchenPrintData(order, options = {}) {
         }
       });
       Object.entries(selectionsByStep).forEach(([step, options2], stepIdx) => {
-        pushKitchenBodyOn();
         const counted = {};
         options2.forEach((o) => {
           counted[o] = (counted[o] || 0) + 1;
         });
+        if (stepRepeatsItemName(kitchenItemLine, Object.keys(counted))) return;
+        pushKitchenBodyOn();
         kitchenRows(() => formatReceiptStepRows(`${step}:`, Object.entries(counted).map(([n, c]) => `${c}x ${n}`), kitchenItemCols)).forEach((line) => data.push(`${line}
 `));
         pushKitchenBodyOff();
@@ -39158,15 +39365,7 @@ function generateKitchenPrintData(order, options = {}) {
         pushKitchenBodyOff();
       });
     }
-    const itemObservation = getPrintableItemObservation(item);
-    if (settings.showItemNotes && itemObservation) {
-      if (isOrganizedPizzaBlock) pushKitchenPizzaBodyOn();
-      else pushKitchenBodyOn();
-      data.push(CMD.medium_ON);
-      pushKitchenDetailLines(`OBS: ${normalizeText2(itemObservation)}`);
-      if (isOrganizedPizzaBlock) pushKitchenPizzaBodyOff();
-      else pushKitchenBodyOff();
-    }
+    pushKitchenItemObservation(item);
   };
   const groupedPromosCozinha = /* @__PURE__ */ new Map();
   const standaloneCozinha = [];
@@ -39188,9 +39387,21 @@ function generateKitchenPrintData(order, options = {}) {
     groupedStandaloneCozinha.get(normCat).push(item);
   });
   const sortedStandaloneCats = Array.from(groupedStandaloneCozinha.keys());
-  sortedStandaloneCats.forEach((catName, catIdx) => {
-    if (catIdx > 0) data.push(separatorFine);
-    if (!categoryRepeatsItemNames(catName, groupedStandaloneCozinha.get(catName))) {
+  const showEveryKitchenCategoryTitle = sortedStandaloneCats.length > 1 && sortedStandaloneCats.some((category) => !categoryRepeatsItemNames(category, groupedStandaloneCozinha.get(category)));
+  const kitchenItemPosition = new Map(sectorItems.map((item, index) => [item, index]));
+  const kitchenBlocks = [
+    ...sortedStandaloneCats.map((catName) => ({ promoName: "", catName, items: groupedStandaloneCozinha.get(catName) })),
+    ...Array.from(groupedPromosCozinha.entries()).map(([promoName, items]) => ({ promoName, catName: "", items }))
+  ].sort((a, b) => (kitchenItemPosition.get(a.items[0]) ?? 0) - (kitchenItemPosition.get(b.items[0]) ?? 0));
+  kitchenBlocks.forEach(({ promoName, catName, items }, blockIdx) => {
+    if (blockIdx > 0) data.push(separatorFine);
+    if (promoName) {
+      pushPromotionBanner(data, settings, `PROMO: ${promoName}`);
+      printItemsWithDetailSeparators(data, items, separatorFine, (item) => printKitchenItem(item));
+      return;
+    }
+    const barSingleCategory = isBarSector && sortedStandaloneCats.length === 1 && groupedPromosCozinha.size === 0;
+    if (!barSingleCategory && (showEveryKitchenCategoryTitle || !categoryRepeatsItemNames(catName, items))) {
       data.push(CMD.ALIGN_LEFT);
       data.push(CMD.medium_ON);
       const categoryTitle = catName === "PIZZAS" ? "*** PIZZAS ***" : catName;
@@ -39200,20 +39411,12 @@ function generateKitchenPrintData(order, options = {}) {
       data.push(CMD.ALIGN_LEFT);
       restoreReceiptTextStyle();
     }
-    groupedStandaloneCozinha.get(catName).forEach((item, itemIdx) => {
-      if (itemIdx > 0) data.push(separatorFine);
-      printKitchenItem(item, catName);
-    });
-  });
-  groupedPromosCozinha.forEach((groupItems, promoName) => {
-    if (sortedStandaloneCats.length > 0) data.push(separatorFine);
-    pushPromotionBanner(data, settings, `PROMO: ${promoName}`);
-    groupItems.forEach((item, itemIdx) => {
-      if (itemIdx > 0) data.push(separatorFine);
-      printKitchenItem(item);
-    });
+    printItemsWithDetailSeparators(data, items, separatorFine, (item) => printKitchenItem(item, catName));
   });
   if (shouldPrintKitchenBeverageSection) {
+    data.push(CMD.ALIGN_LEFT);
+    const lastTextBeforeBeverages = [...data].reverse().find((chunk) => typeof chunk === "string" && !chunk.includes(CMD.ESC) && !chunk.includes(CMD.GS) && chunk.trim());
+    if (sectorItems.length > 0 && lastTextBeforeBeverages !== separator && lastTextBeforeBeverages !== separatorFine) data.push(separatorFine);
     pushReceiptSectionTitle(data, settings, "BEBIDAS / CONFERIR");
     const groupedBebidas = /* @__PURE__ */ new Map();
     mergedItemsBebida.forEach((item) => {
@@ -39245,12 +39448,14 @@ function generateKitchenPrintData(order, options = {}) {
         const sizeStr = size ? ` (${formatPrintedItemSize(size)})` : "";
         const unitPrice = item.unit_price || item.unitPrice || item.price || 0;
         const totalItem = item.totalPrice || item.total_price || qty * unitPrice;
-        const qtyText = settings.showItemQuantity ? `${qty}x ` : "";
+        const qtyText = `${qty}x `;
         const priceText = settings.showItemPrice ? ` R$ ${fmtMoney(totalItem)}` : "";
         pushKitchenPizzaBodyOn();
         kitchenRows(() => formatReceiptItemRows2(`${qtyText}${name}${sizeStr}`, priceText.trim() || void 0, kitchenItemCols)).forEach((line) => data.push(`${line}
 `));
         pushKitchenBodyOff();
+        pushKitchenItemOptions(item);
+        pushKitchenItemObservation(item);
       });
     });
     data.push(separator);
@@ -39261,18 +39466,16 @@ function generateKitchenPrintData(order, options = {}) {
     if (lastItemText !== separator && lastItemText !== separatorFine) data.push(separatorFine);
   }
   if (settings.showOrderNotes && printableNotes) {
-    pushMediumOn(settings.mediumItems);
-    data.push(EMPH_ON);
-    wrapReceiptColumnText(`OBS: ${printableNotes}`, cols).forEach((line) => data.push(`${line}
+    pushKitchenBodyOn();
+    formatReceiptLabeledRowsInline("OBS:", printableNotes, kitchenItemCols).forEach((line) => data.push(`${line}
 `));
-    data.push(EMPH_OFF);
-    pushMediumOff(settings.mediumItems);
+    pushKitchenBodyOff();
   }
   if (settings.showOrderNotes && order.internal_notes) {
-    pushMediumOn(settings.mediumItems);
-    data.push(` ** NOTA INTERNA: ${normalizeText2(order.internal_notes)} **
-`);
-    pushMediumOff(settings.mediumItems);
+    pushKitchenBodyOn();
+    formatReceiptLabeledRowsInline("NOTA INTERNA:", order.internal_notes, kitchenItemCols).forEach((line) => data.push(`${line}
+`));
+    pushKitchenBodyOff();
   }
   if (settings.showTotal) {
     const total = resolvePrintableOrderTotal(order);
@@ -39295,7 +39498,6 @@ function generateKitchenPrintData(order, options = {}) {
   }
   const lastTextChunk = [...data].reverse().find((chunk) => typeof chunk === "string" && !chunk.includes(CMD.ESC) && !chunk.includes(CMD.GS));
   if (lastTextChunk !== separatorFine) {
-    if (settings.paperWidth > 32) data.push("\n");
     data.push(separatorFine);
   }
   data.push(CMD.ALIGN_LEFT);
@@ -39308,7 +39510,7 @@ function generateKitchenPrintData(order, options = {}) {
   }
   data.push(padPair(countLine, "@pedidoshub", cols));
   pushMediumOff(settings.mediumItems);
-  for (let i = 0; i < (settings.paperWidth <= 32 ? Math.min(settings.feedLines, 2) : settings.feedLines); i++) {
+  for (let i = 0; i < settings.feedLines; i++) {
     data.push("\n");
   }
   if (settings.autoCut) {
@@ -39321,10 +39523,16 @@ function appendDeliveryDispatchBarcode(data, order, settings) {
   if (orderType !== "delivery") return false;
   const code = buildDeliveryDispatchCode(order == null ? void 0 : order.id);
   if (!code) return false;
-  const raster = deliveryCode128Raster(code, getRasterPaperDots(settings));
+  const raster = deliveryCode128Raster(
+    code,
+    getRasterPaperDots(settings),
+    getReceiptGeometry(settings).contentWidthDots
+  );
   if (!raster) return false;
+  applyReceiptFont(data, settings, "A");
   data.push(CMD.ALIGN_CENTER, CMD.INVERSE_OFF, CMD.TXT_NORMAL, raster, "\n");
-  data.push(CMD.medium_ON, `ENTREGA ${code}
+  applyReceiptTextStyle(data, settings);
+  data.push(CMD.ALIGN_CENTER, CMD.medium_ON, `ENTREGA ${code}
 `, CMD.medium_OFF, CMD.ALIGN_LEFT);
   return true;
 }
@@ -39338,10 +39546,12 @@ function appendMarketplaceCoupon(data, order, width, settings, feedLines = setti
     data.push(CMD.CUT_FULL);
   }
   data.push(CMD.ALIGN_CENTER, CMD.TXT_NORMAL, "\n", "-".repeat(width) + "\n");
-  data.push("UM PRESENTE PARA VOCE\n", "PECA DIRETO NO NOSSO CARDAPIO\n", CMD.medium_ON, coupon.benefit + "\n", CMD.medium_OFF);
+  const tallOn = `${CMD.TXT_DOUBLE_H}${TALL_LINE_SPACING_A}`;
+  const tallOff = `${CMD.TXT_NORMAL}${getLineSpacingCommand(settings)}`;
+  data.push("UM PRESENTE PARA VOCE\n", "PECA DIRETO NO NOSSO CARDAPIO\n", tallOn, CMD.medium_ON, coupon.benefit + "\n", CMD.medium_OFF, tallOff);
   data.push("NO SEU PROXIMO PEDIDO\n", "\n", qr, "\n");
-  data.push("ESCANEIE O QR CODE\n", `CUPOM: ${coupon.code}
-`);
+  data.push("ESCANEIE O QR CODE\n", tallOn, `CUPOM: ${coupon.code}
+`, tallOff);
   if (coupon.minimum) data.push(`PEDIDO MINIMO: R$ ${coupon.minimum.toFixed(2).replace(".", ",")}
 `);
   if (coupon.expires) data.push(`VALIDO ATE ${new Date(coupon.expires).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo" })}
@@ -39349,96 +39559,306 @@ function appendMarketplaceCoupon(data, order, width, settings, feedLines = setti
   data.push("CONSULTE AS REGRAS NO CARDAPIO\n", "-".repeat(width) + "\n", CMD.ALIGN_LEFT);
   return true;
 }
+function formatReceiptMoney(val) {
+  return (Number(val) || 0).toFixed(2).replace(".", ",").replace(/\B(?=(\d{3})+(?!\d))(?=.*,)/g, ".");
+}
+function getLargeItemCommands(settings) {
+  if (settings.fontSize !== "large") return { on: "", off: "" };
+  return { on: `${CMD.TXT_DOUBLE_H}${TALL_LINE_SPACING_A}`, off: `${CMD.TXT_NORMAL}${getLineSpacingCommand(settings)}` };
+}
+function pushTallCenteredLines(data, settings, texts) {
+  applyReceiptFont(data, settings, "A");
+  const colsA = getReceiptGeometry(settings, "A").contentColumns;
+  data.push(CMD.ALIGN_CENTER, CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A, EMPH_ON);
+  texts.forEach((text) => wrapReceiptText(text, colsA).forEach((line) => data.push(`${line}
+`)));
+  data.push(EMPH_OFF, CMD.TXT_NORMAL);
+  applyReceiptTextStyle(data, settings);
+  data.push(CMD.ALIGN_LEFT);
+}
+function pushChargeLine(data, settings, paymentMethod, chargeAmount) {
+  const value = `R$ ${formatReceiptMoney(chargeAmount)}`;
+  const method = shortenPrintedCardLabel(normalizeText2(paymentMethod));
+  const full = ["COBRAR", method, value].filter(Boolean).join(" ");
+  const colsA = getReceiptGeometry(settings, "A").contentColumns;
+  const colsB = getReceiptGeometry(settings, "B").contentColumns;
+  let font = "A";
+  let text = full;
+  if (full.length > colsA) {
+    font = "B";
+    if (full.length > colsB) {
+      const room = Math.max(0, colsB - `COBRAR  ${value}`.length);
+      text = ["COBRAR", method.slice(0, room).trim(), value].filter(Boolean).join(" ");
+    }
+  }
+  applyReceiptFont(data, settings, font);
+  data.push(CMD.ALIGN_CENTER, CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A, EMPH_ON, `${text}
+`, EMPH_OFF, CMD.TXT_NORMAL);
+  applyReceiptTextStyle(data, settings);
+  data.push(CMD.ALIGN_LEFT);
+}
+function pushSimplePaymentRow(data, settings, paymentMethod, isPaid, chargeAmount = 0, paidText = "JA PAGO - NAO COBRAR") {
+  const texts = [];
+  const method = shortenPrintedCardLabel(paymentMethod);
+  if (isPaid) {
+    texts.push(paidText);
+    if (method) texts.push(method);
+  } else if (chargeAmount > 0) {
+    pushChargeLine(data, settings, method, chargeAmount);
+    return chargeAmount;
+  } else if (method) {
+    texts.push(method);
+  }
+  pushTallCenteredLines(data, settings, texts);
+  return 0;
+}
+function looksLikeReceiptTechnicalId(val) {
+  return /^[a-z]{1,4}_|^\d{10,}$|_[0-9a-f]{8,}$/i.test(val || "");
+}
+function pushBeverageAlertBlock(data, order, settings, beverageItems, showFinancialItemPrice) {
+  if (beverageItems.length === 0) return;
+  const orderType = order.order_type || order.orderType;
+  const separatorFine = "-".repeat(getPrinterCols(settings)) + "\n";
+  const { on: LARGE_ITEM_ON, off: LARGE_ITEM_OFF } = getLargeItemCommands(settings);
+  const fmtMoney = formatReceiptMoney;
+  const restoreReceiptTextStyle = () => applyReceiptTextStyle(data, settings);
+  const pushSeparatorOnce = (sep) => {
+    const last = [...data].reverse().find((chunk) => typeof chunk === "string" && !chunk.includes(CMD.ESC) && !chunk.includes(CMD.GS) && chunk.trim());
+    if (!/^\s*(.)\1+\s*\n$/.test(String(last || ""))) data.push(sep);
+  };
+  const beverageCols = getReceiptGeometry(settings, getReceiptFontFamily(settings.fontSize)).contentColumns;
+  let bevHeader = "ATENCAO";
+  if (orderType === "delivery") bevHeader = "ATENCAO MOTOBOY";
+  data.push(CMD.ALIGN_LEFT);
+  pushSeparatorOnce(separatorFine);
+  applyReceiptFont(data, settings, "A");
+  data.push(CMD.ALIGN_CENTER, CMD.INVERSE_OFF, CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A, EMPH_ON);
+  const bevHeaderLine = orderType === "delivery" ? `${bevHeader} - LEVAR BEBIDAS:` : `${bevHeader} - SEPARAR BEBIDAS:`;
+  const bevColumns = getReceiptGeometry(settings, "A").contentColumns;
+  const wideBeverageHeader = (orderType !== "delivery" || settings.paperWidth > 32) && bevHeaderLine.length <= bevColumns;
+  data.push(`${wideBeverageHeader ? bevHeaderLine : bevHeader}
+`);
+  data.push(EMPH_OFF, CMD.TXT_NORMAL);
+  restoreReceiptTextStyle();
+  data.push(CMD.ALIGN_LEFT);
+  const beverageRows = beverageItems.map((item) => {
+    const qty = Number(item.quantity ?? 1) || 1;
+    const name = normalizeText2(item.product_name || item.productName || item.name || "Bebida");
+    let size = resolvePrintedItemSize(item);
+    if (size && looksLikeReceiptTechnicalId(size)) size = null;
+    if (size && shouldHidePrintedItemSize(item, size)) size = null;
+    const sizeStr = size ? ` (${formatPrintedItemSize(size)})` : "";
+    const rawTotal = item.totalPrice ?? item.total_price;
+    const rawUnit = item.unitPrice ?? item.unit_price ?? item.price ?? 0;
+    const parsedTotal = rawTotal === void 0 || rawTotal === null ? NaN : Number(rawTotal);
+    const parsedUnit = Number(rawUnit);
+    const total = Number.isFinite(parsedTotal) ? parsedTotal : Number.isFinite(parsedUnit) ? parsedUnit * qty : 0;
+    const details = getMarmitaSelectionDisplayGroups(item).map((group) => {
+      const options = group.options.map((option) => `${option.count}x ${option.name}`).join(", ");
+      const extra = showFinancialItemPrice && group.extraTotal > 0 ? ` (+R$ ${fmtMoney(group.extraTotal)})` : "";
+      return `${group.step}: ${options}${extra}`;
+    });
+    const isComboBeverage = Boolean(item.promotionName || item.promotion_name || item.promotionId || item.promotion_id);
+    const qtyPrefix = settings.showItemQuantity === false && qty === 1 ? "" : `${qty}x `;
+    return {
+      left: `${qtyPrefix}${name}${sizeStr}`,
+      right: !showFinancialItemPrice ? "" : total > 0 ? `R$ ${fmtMoney(total)}` : isComboBeverage ? "(COMBO)" : "",
+      details,
+      item
+    };
+  });
+  const pushBeverageDetails = (row) => {
+    if (row.details.length === 0) return;
+    data.push(CMD.DOUBLE_STRIKE_OFF);
+    data.push(CMD.medium_OFF);
+    row.details.forEach((detail) => {
+      wrapCompactPrintEntries([detail], beverageCols - 2).forEach((line) => {
+        data.push(`  ${line}
+`);
+      });
+    });
+    data.push(CMD.medium_ON);
+    data.push(CMD.DOUBLE_STRIKE_ON);
+  };
+  const pushBeverageOptionsAndNotes = (row) => {
+    const item = row.item;
+    const rows = [];
+    if (row.details.length === 0) {
+      if (Array.isArray(item.extras)) {
+        item.extras.forEach((extra) => rows.push(...formatReceiptDetailRows(`+ ${normalizeText2((extra == null ? void 0 : extra.name) || extra)}`, beverageCols)));
+      }
+      if (Array.isArray(item.options)) {
+        const optionsByStep = {};
+        item.options.forEach((opt) => {
+          const optionLine = `${getPrintedOptionQuantity(item, opt, order)}x ${normalizeText2((opt == null ? void 0 : opt.name) || opt)}`;
+          const stepName = normalizeText2((opt == null ? void 0 : opt.groupName) || (opt == null ? void 0 : opt.group_name) || (opt == null ? void 0 : opt.stepName) || (opt == null ? void 0 : opt.step_name) || (opt == null ? void 0 : opt.step) || "").trim();
+          if (stepName) (optionsByStep[stepName] ||= []).push(optionLine);
+          else rows.push(...formatReceiptDetailRows(`+ ${optionLine}`, beverageCols));
+        });
+        Object.entries(optionsByStep).forEach(([stepName, choices]) => {
+          if (stepRepeatsItemName(row.left, choices)) return;
+          rows.push(...formatReceiptStepRows(`${stepName}:`, choices, beverageCols));
+        });
+      }
+    }
+    const isPromoBeverage = Boolean(item.promotionName || item.promotion_name);
+    const showObservation = isPromoBeverage ? settings.showOrderNotes !== false : settings.showItemNotes;
+    const observation = getPrintableItemObservation(item);
+    if (showObservation && observation) rows.push(...formatReceiptDetailRows(`OBS: ${normalizeText2(observation)}`, beverageCols));
+    rows.forEach((line) => data.push(`${line}
+`));
+  };
+  data.push(LARGE_ITEM_ON);
+  data.push(CMD.medium_ON);
+  data.push(CMD.DOUBLE_STRIKE_ON);
+  beverageRows.forEach((row) => {
+    withCompactReceiptGrid(true, () => {
+      data.push(EMPH_ON, ...formatReceiptItemRows2(row.left, row.right, beverageCols).map((line) => `${line}
+`), EMPH_OFF);
+      pushBeverageDetails(row);
+      data.push(EMPH_ON);
+      pushBeverageOptionsAndNotes(row);
+      data.push(EMPH_OFF);
+    });
+  });
+  data.push(CMD.DOUBLE_STRIKE_OFF);
+  data.push(CMD.medium_OFF);
+  data.push(LARGE_ITEM_OFF);
+  restoreReceiptTextStyle();
+}
+function formatReceiptDetailRowsWithPrice(text, price, width, extraIndent = 0) {
+  var _a;
+  const rows = formatReceiptDetailRows(text, width, extraIndent);
+  const right = String(price || "").trim();
+  if (!right) return rows;
+  if (rows.length === 1 && rows[0].length + 1 + right.length <= width) {
+    return [`${rows[0].padEnd(width - right.length)}${right}`];
+  }
+  const indent = getReceiptGridLayout(width).itemStart + Math.max(0, extraIndent);
+  const normalized = normalizeText2(text).replace(/\s+/g, " ").trim();
+  const hanging = (((_a = normalized.match(RECEIPT_DETAIL_HANGING_PREFIX)) == null ? void 0 : _a[0]) || "").length;
+  const firstWidth = width - indent - right.length - 1;
+  const words = normalized.split(" ");
+  let first = "";
+  while (words.length && `${first}${first ? " " : ""}${words[0]}`.length <= firstWidth) {
+    first = `${first}${first ? " " : ""}${words.shift()}`;
+  }
+  if (!first) return [...rows, right.padStart(width)];
+  const rest = words.length ? wrapReceiptColumnText(words.join(" "), Math.max(8, width - indent - hanging)).map((line) => `${" ".repeat(indent + hanging)}${line}`) : [];
+  return [`${`${" ".repeat(indent)}${first}`.padEnd(width - right.length)}${right}`, ...rest];
+}
+function pushMarketplaceChangeRows(data, settings, cols, changeFor, chargeAmount) {
+  if (!(changeFor > 0)) return;
+  data.push(CMD.ALIGN_LEFT, padPair("TROCO PARA:", `R$ ${formatReceiptMoney(changeFor)}`, cols));
+  if (changeFor > chargeAmount + 9e-3) {
+    pushTallCenteredLines(data, settings, [`LEVAR TROCO: R$ ${formatReceiptMoney(changeFor - chargeAmount)}`]);
+  }
+}
+function marketplacePaidDetail(label) {
+  const text = normalizeText2(label).replace(/\s+/g, " ").trim().toUpperCase();
+  if (!text || /ONLINE|\bAPP\b|SITE|IFOOD|99FOOD/.test(text)) return "";
+  return text;
+}
 function generateIfoodPrintData(order, settings = getPrintSettings()) {
   const data = [];
   const cols = getPrinterCols(settings);
   const receiptPair = (left, right, width = cols) => padPair(left, right, width);
-  const separatorEqual = "-".repeat(cols) + "\n";
-  const separatorHifen = "-".repeat(cols) + "\n";
-  const emptyLine = () => data.push("\n");
-  const fmtMoney = (val) => (val || 0).toFixed(2).replace(".", ",");
+  const separator = "-".repeat(cols) + "\n";
+  const is58mm = settings.paperWidth <= 32;
+  const itemRows = (build) => withCompactReceiptGrid(is58mm, build);
+  const { on: LARGE_ITEM_ON, off: LARGE_ITEM_OFF } = getLargeItemCommands(settings);
+  const pushItemRows = (rows) => {
+    data.push(LARGE_ITEM_ON, EMPH_ON);
+    rows.forEach((line) => data.push(`${line}
+`));
+    data.push(EMPH_OFF, LARGE_ITEM_OFF);
+  };
+  const fmtMoney = formatReceiptMoney;
   const orderNum = String(order.order_number || order.orderNumber || order.id || "0").padStart(4, "0");
   const cd = order.customData || order.custom_data;
   const displayId = (cd == null ? void 0 : cd.displayId) || order.displayId || order.display_id || orderNum;
   const orderType = order.order_type || order.orderType;
   const scheduledDate = getOrderScheduledPrintDate(order);
   let typeLabel = scheduledDate ? "Entrega Agendada" : "Entrega";
-  if (orderType === "balcao") typeLabel = isCounterOrder(order) ? "Balc\xE3o" : scheduledDate ? "Retirada Agendada" : "Pra Retirar";
+  if (orderType === "balcao") typeLabel = isCounterOrder(order) ? "Balcao" : scheduledDate ? "Retirada Agendada" : "Retirada";
   else if (orderType === "mesa") typeLabel = "Na Mesa";
   typeLabel = kioskPrintTypeLabel(cd, order.table_number || order.tableNumber) || typeLabel;
   const cName = normalizeText2(order.customer_name || order.customerName || "Cliente");
   const cPhone = order.customer_phone || order.customerPhone || "";
   const created = parseOrderDate(order.created_at || order.createdAt);
-  const deliveryTimeStr = cd == null ? void 0 : cd.expectedDeliveryTime;
-  const deliveryTime = deliveryTimeStr ? safeDate(deliveryTimeStr) : new Date(created.getTime() + 40 * 6e4);
+  const deliveryTime = parseOptionalPrintDate(cd == null ? void 0 : cd.expectedDeliveryTime) || scheduledDate;
   data.push(CMD.RESET);
   applyReceiptPrintArea(data, settings);
-  applyReceiptFont(data, settings, "A");
+  applyReceiptTextStyle(data, settings);
   data.push("\n");
-  applyReceiptFont(data, settings, "A");
   data.push(CMD.ALIGN_CENTER);
-  data.push(CMD.TXT_NORMAL);
   if (settings.storeName) {
-    data.push(CMD.medium_ON);
+    data.push(EMPH_ON);
     data.push(`${normalizeText2(settings.storeName).toUpperCase()}
 `);
-    data.push(CMD.medium_OFF);
+    data.push(EMPH_OFF);
   }
-  const expandedOrderNumber = pushExpressoOrderNumberSize(data, order, settings);
-  data.push(CMD.medium_ON);
-  data.push(`PEDIDO #${displayId}
-`);
-  data.push(CMD.medium_OFF);
-  popExpressoOrderNumberSize(data, expandedOrderNumber);
-  data.push(`IFOOD - ${typeLabel}
-`);
-  emptyLine();
+  pushOrderHeadline(data, settings, typeLabel, `#${normalizeText2(String(displayId))}`);
+  data.push(CMD.ALIGN_CENTER, "* IFOOD *\n");
+  if (cd == null ? void 0 : cd.pickupCode) {
+    pushTallCenteredLines(data, settings, [`COLETA ${normalizeText2(String(cd.pickupCode))}`]);
+  }
   data.push(CMD.ALIGN_LEFT);
-  data.push(separatorHifen);
-  data.push(CMD.ALIGN_LEFT);
-  data.push(CMD.TXT_DOUBLE_H);
-  data.push(`${typeLabel.toUpperCase()}
+  data.push(separator);
+  data.push(`CRIADO EM: ${formatDateTimeBR(created)}
 `);
-  data.push(CMD.TXT_NORMAL);
-  emptyLine();
-  data.push(CMD.ALIGN_LEFT);
-  data.push(`Data do Pedido:  ${created.toLocaleString("pt-BR")}
+  if (deliveryTime) {
+    const forecastLabel = orderType === "balcao" ? "RETIRAR ATE" : "ENTREGAR ATE";
+    data.push(`${forecastLabel}: ${scheduledDate ? formatDateTimeBR(deliveryTime) : formatTimeBR(deliveryTime)}
 `);
-  data.push(`Data de Entrega: ${deliveryTime.toLocaleString("pt-BR")}
+  }
+  data.push(EMPH_ON);
+  formatReceiptLabeledRowsInline("CLIENTE:", cName, cols).forEach((line) => data.push(`${line}
+`));
+  data.push(EMPH_OFF);
+  if (cPhone) data.push(`TEL: ${cPhone}
 `);
-  emptyLine();
-  data.push(`Cliente: ${cName}
-`);
-  if (cPhone) data.push(`Telefone: ${cPhone} ID: ${displayId}
-`);
+  if (cd == null ? void 0 : cd.localizer) data.push(EMPH_ON, `LOCALIZADOR: ${normalizeText2(String(cd.localizer))}
+`, EMPH_OFF);
   if (order.street || order.customer_address) {
+    data.push(EMPH_ON);
     if (order.street) {
-      data.push(`Rua: ${normalizeText2(order.street)}
-`);
-      data.push(`N\xFAmero: ${order.number || "S/N"}
-`);
-      if (order.neighborhood) data.push(`Bairro: ${normalizeText2(order.neighborhood)}
-`);
-      if (order.complement) data.push(`Comp: ${normalizeText2(order.complement)}
-`);
-      if (order.reference) data.push(`Ref: ${normalizeText2(order.reference)}
-`);
+      const pushLabeled = (label, value) => {
+        formatReceiptLabeledRowsInline(label, value, cols).forEach((line) => data.push(`${line}
+`));
+      };
+      pushLabeled("RUA:", order.street);
+      pushLabeled("NUMERO:", order.number || "S/N");
+      if (order.neighborhood) {
+        const tall = orderType === "delivery";
+        if (tall) data.push(CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A);
+        pushLabeled("BAIRRO:", order.neighborhood);
+        if (tall) data.push(CMD.TXT_NORMAL, getLineSpacingCommand(settings));
+      }
+      if (order.complement) pushLabeled("COMP:", order.complement);
+      if (order.reference) pushLabeled("REF:", order.reference);
     } else {
       const parts = normalizeText2(order.customer_address).split(",").map((p) => p.trim()).filter(Boolean);
       parts.forEach((p) => data.push(`${p}
 `));
     }
+    data.push(EMPH_OFF);
   }
   if (cd == null ? void 0 : cd.ordersCountOnMerchant) {
     data.push(`${cd.ordersCountOnMerchant} pedidos na sua loja
 `);
   }
-  data.push(separatorHifen);
+  data.push(separator);
   data.push(CMD.ALIGN_LEFT);
-  data.push("ITENS DO PEDIDO\n");
-  data.push(CMD.ALIGN_LEFT);
-  (order.items || []).forEach((item) => {
-    var _a;
+  if (!is58mm) {
+    data.push(`${itemRows(() => formatReceiptColumnHeader(cols, "TOTAL"))}
+`);
+    data.push(separator);
+  }
+  const highlightBeverages = shouldHighlightBeveragesForPrint(order, settings);
+  const isHighlightedBeverage = (item) => highlightBeverages && isBeveragePrintItem(item, getPrintItemCategory(item));
+  const allItems = order.items || [];
+  itemRows(() => printItemsWithDetailSeparators(data, allItems.filter((item) => !isHighlightedBeverage(item)), separator, (item) => {
     const qty = item.showQuantity || item.quantity || 1;
     const name = normalizeText2(item.name || item.product_name || item.productName || "Item");
     const unitPrice = item.price || item.unitPrice || item.unit_price || 0;
@@ -39451,132 +39871,147 @@ function generateIfoodPrintData(order, settings = getPrintSettings()) {
     }
     const flavors = getPrintedPizzaFlavorItems(item, name, size, itemCategory);
     const isOrganizedPizzaBlock = flavors.length > 0;
-    data.push(`${qty} UN
-`);
+    const price = `R$ ${fmtMoney(total)}`;
     if (isOrganizedPizzaBlock) {
-      const pizzaLabel = size ? `PIZZA: ${formatPrintedItemSize(size, { uppercase: true })}` : "PIZZA";
-      data.push(receiptPair(pizzaLabel, `R$ ${fmtMoney(total)}`));
+      const sizeText = size ? ` ${formatPrintedItemSize(size, { uppercase: true })}` : "";
+      pushItemRows(formatReceiptItemRows2(`${qty}x PIZZA${sizeText}`, price, cols));
       const borderName = getPrintedBorderName(item);
-      if (borderName) data.push(`BORDA: ${normalizeText2(borderName)}
-`);
-      const fraction = formatPrintedFlavorSharePrefixForItem(item, flavors.length);
+      if (borderName) pushItemRows(formatReceiptDetailRows(`# BORDA: ${normalizeText2(borderName)} #`, cols));
+      const { fraction, piecesSuffix } = formatPrintedFlavorShareForItem(item, flavors.length);
       flavors.forEach((flavor) => {
         const flavorName = typeof flavor === "string" ? flavor : flavor.name || "";
-        if (flavorName) data.push(`${fraction}${formatPrintedPizzaFlavorNameForKitchen(flavorName)}
-`);
+        if (!flavorName) return;
+        const flavorPrice = typeof flavor === "string" ? 0 : firstPrintableMoney(flavor.price, flavor.unitPrice, flavor.unit_price);
+        const flavorRight = flavors.length > 1 && flavorPrice > 0 ? `R$ ${fmtMoney(flavorPrice)}` : "";
+        pushItemRows(formatReceiptDetailRowsWithPrice(`${fraction}${formatPrintedPizzaFlavorNameForKitchen(flavorName)}${piecesSuffix}`, flavorRight, cols));
       });
     } else {
-      data.push(receiptPair(name, `R$ ${fmtMoney(total)}`));
+      pushItemRows(formatReceiptItemRows2(`${qty}x ${name}`, price, cols));
     }
     if (item.options && item.options.length > 0) {
-      item.options.filter((opt) => !shouldSkipStructuredPizzaOption(item, opt)).forEach((opt) => {
-        const optQty = getPrintedOptionQuantity(item, opt, order);
-        const optName = normalizeText2(getPrintedOptionDisplayName(opt));
-        const optPrice = opt.price || opt.unitPrice || 0;
-        const optTotal = opt.totalPrice || optPrice * optQty;
-        const priceStr = optTotal > 0 ? `R$ ${fmtMoney(optTotal)}` : "";
-        data.push(receiptPair(`  ${optQty} UN ${optName}`, priceStr));
+      item.options.filter((opt) => !shouldSkipStructuredPizzaOption(item, opt)).forEach((topOption) => {
+        walkPrintedOptions([topOption], (opt, level) => {
+          const optQty = getPrintedOptionQuantity(item, opt, order);
+          const optName = normalizeText2(getPrintedOptionDisplayName(opt));
+          const optPrice = opt.price || opt.unitPrice || 0;
+          const optTotal = opt.totalPrice || optPrice * optQty;
+          const priceStr = optTotal > 0 ? `R$ ${fmtMoney(optTotal)}` : "";
+          pushItemRows(formatReceiptDetailRowsWithPrice(`+ ${optQty}x ${optName}`, priceStr, cols, (level - 1) * 2));
+        });
       });
     }
     if (item.observations) {
-      data.push(`Obs: ${normalizeText2(item.observations)}
-`);
+      pushItemRows(formatReceiptDetailRows(`OBS: ${normalizeText2(item.observations)}`, cols));
     }
-    if (((_a = item.options) == null ? void 0 : _a.length) > 0) {
-      data.push(receiptPair(`Total do item`, `R$ ${fmtMoney(total)}`));
+  }));
+  pushBeverageAlertBlock(data, order, settings, allItems.filter(isHighlightedBeverage), true);
+  if (settings.showOrderNotes !== false && (order.notes || order.observations)) {
+    const cleanNotes = normalizeText2(removePaymentFeeFromNotes(order.notes || order.observations));
+    if (cleanNotes) {
+      data.push(CMD.ALIGN_LEFT, separator);
+      data.push(LARGE_ITEM_ON, EMPH_ON);
+      formatReceiptLabeledRowsInline("OBSERVACOES:", cleanNotes, cols).forEach((line) => data.push(`${line}
+`));
+      data.push(EMPH_OFF, LARGE_ITEM_OFF);
     }
-    data.push(separatorHifen);
-  });
-  data.push(CMD.ALIGN_LEFT);
-  data.push("TOTAL\n");
-  data.push(separatorEqual);
+  }
   const subtotal = order.subtotal || (order.items || []).reduce((acc, i) => acc + (i.totalPrice || 0), 0);
   const deliveryFee = order.delivery_fee || order.deliveryFee || 0;
   const discount = order.discount || 0;
   const couvertEsc = Number(order.couvert) || 0;
   const serviceFeeEsc = Number(order.service_fee) || 0;
   const totalVal = resolvePrintableOrderTotal(order);
-  data.push(receiptPair("| Valor total dos itens", `R$ ${fmtMoney(subtotal)} |`));
-  if (deliveryFee > 0) data.push(receiptPair("| Taxa de Entrega", `R$ ${fmtMoney(deliveryFee)} |`));
-  if (discount > 0) {
-    const discIfood = (cd == null ? void 0 : cd.discountIfood) || 0;
-    const discMerchant = (cd == null ? void 0 : cd.discountMerchant) || 0;
-    if (discIfood > 0 || discMerchant > 0) {
-      if (discIfood > 0) data.push(receiptPair("| Desc iFood", `- R$ ${fmtMoney(discIfood)} |`));
-      if (discMerchant > 0) data.push(receiptPair("| Desc Loja", `- R$ ${fmtMoney(discMerchant)} |`));
-    } else {
-      data.push(receiptPair("| Desconto", `- R$ ${fmtMoney(discount)} |`));
-    }
-  }
-  const addFeesEsc = (cd == null ? void 0 : cd.additionalFees) || 0;
-  if (addFeesEsc > 0) {
-    data.push(receiptPair("| Taxa de Servico", `R$ ${fmtMoney(addFeesEsc)} |`));
-  }
-  if (couvertEsc > 0) {
-    data.push(receiptPair("| Couvert Artistico", `R$ ${fmtMoney(couvertEsc)} |`));
-  }
-  if (serviceFeeEsc > 0) {
-    const pctEsc = order.service_fee_percent ? ` (${order.service_fee_percent}%)` : "";
-    data.push(receiptPair(`| Taxa de Servico${pctEsc}`, `R$ ${fmtMoney(serviceFeeEsc)} |`));
-  }
-  data.push(receiptPair("| VALOR TOTAL", `R$ ${fmtMoney(totalVal)} |`));
-  data.push(separatorEqual);
-  emptyLine();
-  data.push(CMD.ALIGN_LEFT);
-  data.push("FORMAS DE PAGAMENTO\n");
-  data.push(separatorEqual);
   let pmName = formatPaymentMethodForPrint(order);
   const legacySplits = getParsedPaymentSplits(order);
   const cardBrand = cd == null ? void 0 : cd.cardBrand;
   if (cardBrand) pmName = `${pmName} (${cardBrand})`;
   const isOnline = (cd == null ? void 0 : cd.isPrepaid) === true || Number((cd == null ? void 0 : cd.pendingAmount) ?? 0) === 0 && Number((cd == null ? void 0 : cd.prepaidAmount) ?? 0) > 0 || pmName.toLowerCase().includes("online") || pmName.toLowerCase().includes("site") || pmName.toLowerCase().includes("app") || pmName === "PIX ONLINE";
+  const prepaidAmount = Number(cd == null ? void 0 : cd.prepaidAmount) || 0;
+  const pendingAmount = Number(cd == null ? void 0 : cd.pendingAmount) || 0;
+  const due = pendingAmount > 0 ? pendingAmount : totalVal;
+  const changeFor = Number(order.change_for || order.changeFor) || 0;
+  const pendingSplitAmount = Math.round(legacySplits.filter((split) => split.paid !== true).reduce((sum, split) => sum + (Number(split.amount) || 0), 0) * 100) / 100;
+  const chargeAmount = legacySplits.length > 0 ? order.payment_status === "paid" ? 0 : pendingSplitAmount : isOnline ? 0 : due;
+  data.push(CMD.ALIGN_LEFT);
+  data.push(separator);
+  data.push(receiptPair("Valor total dos itens", `R$ ${fmtMoney(subtotal)}`));
+  if (deliveryFee > 0) data.push(receiptPair("Taxa de Entrega", `R$ ${fmtMoney(deliveryFee)}`));
+  if (discount > 0) {
+    const discIfood = (cd == null ? void 0 : cd.discountIfood) || 0;
+    const discMerchant = (cd == null ? void 0 : cd.discountMerchant) || 0;
+    if (discIfood > 0 || discMerchant > 0) {
+      if (discIfood > 0) data.push(receiptPair("Desc iFood", `- R$ ${fmtMoney(discIfood)}`));
+      if (discMerchant > 0) data.push(receiptPair("Desc Loja", `- R$ ${fmtMoney(discMerchant)}`));
+    } else {
+      data.push(receiptPair("Desconto", `- R$ ${fmtMoney(discount)}`));
+    }
+  }
+  const addFeeRows = /* @__PURE__ */ new Map();
+  if (Array.isArray(cd == null ? void 0 : cd.additionalFees)) {
+    cd.additionalFees.forEach((fee) => {
+      const value = Number(fee == null ? void 0 : fee.value) || 0;
+      if (value <= 0) return;
+      const label = (fee == null ? void 0 : fee.type) === "SMALL_ORDER_FEE" ? "Taxa Pedido Minimo" : "Taxa de Servico";
+      addFeeRows.set(label, (addFeeRows.get(label) || 0) + value);
+    });
+  }
+  if (addFeeRows.size === 0) {
+    const addFeesEsc = Number(cd == null ? void 0 : cd.totalIfoodFees) || (Array.isArray(cd == null ? void 0 : cd.additionalFees) ? 0 : Number(cd == null ? void 0 : cd.additionalFees) || 0);
+    if (addFeesEsc > 0) addFeeRows.set("Taxa de Servico", addFeesEsc);
+  }
+  addFeeRows.forEach((value, label) => {
+    data.push(receiptPair(label, `R$ ${fmtMoney(value)}`));
+  });
+  if (couvertEsc > 0) {
+    data.push(receiptPair("Couvert Artistico", `R$ ${fmtMoney(couvertEsc)}`));
+  }
+  if (serviceFeeEsc > 0) {
+    const pctEsc = order.service_fee_percent ? ` (${order.service_fee_percent}%)` : "";
+    data.push(receiptPair(`Taxa de Servico${pctEsc}`, `R$ ${fmtMoney(serviceFeeEsc)}`));
+  }
+  const totalTall = !(chargeAmount > 0 && Math.abs(chargeAmount - totalVal) < 5e-3);
+  if (totalTall) data.push(CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A);
+  data.push(EMPH_ON, receiptPair("TOTAL:", `R$ ${fmtMoney(totalVal)}`), EMPH_OFF);
+  if (totalTall) {
+    data.push(CMD.TXT_NORMAL);
+    applyReceiptTextStyle(data, settings);
+  }
+  data.push(separator);
   if (legacySplits.length > 0) {
-    data.push(receiptPair("| Pagamento dividido", "|"));
+    data.push(CMD.ALIGN_LEFT, "Pagamento dividido\n");
     legacySplits.forEach((split) => {
       const splitName = normalizeText2(formatPaymentSplitMethodForPrint(split));
       const splitPaid = split.paid === true ? " [PAGO]" : " [PENDENTE]";
-      data.push(receiptPair(`|   ${splitName}${splitPaid}`, `R$ ${fmtMoney(Number(split.amount) || 0)} |`));
+      data.push(receiptPair(`  ${splitName}${splitPaid}`, `R$ ${fmtMoney(Number(split.amount) || 0)}`));
     });
-    const changeFor = order.change_for || order.changeFor;
-    if (changeFor > 0) {
-      data.push(receiptPair("|   TROCO:", `R$ ${fmtMoney(Math.max(0, changeFor - totalVal))} |`));
-    }
-    if (order.payment_status === "paid") {
-      data.push(CMD.ALIGN_CENTER);
-      data.push(CMD.medium_ON);
-      data.push("JA PAGO - NAO COBRAR\n");
-      data.push(CMD.medium_OFF);
-      data.push(CMD.ALIGN_LEFT);
+    if (chargeAmount > 0) {
+      pushSimplePaymentRow(data, settings, "", false, chargeAmount);
+      pushMarketplaceChangeRows(data, settings, cols, changeFor, chargeAmount);
+    } else {
+      pushTallCenteredLines(data, settings, ["JA PAGO - NAO COBRAR"]);
     }
   } else if (isOnline) {
-    data.push(receiptPair(`| Pagamento Online (${normalizeText2(pmName)})`, `(PAGO) |`));
+    pushSimplePaymentRow(data, settings, cardBrand ? normalizeText2(String(cardBrand)).toUpperCase() : marketplacePaidDetail(formatPaymentMethodForPrint(order)), true, 0, "PAGO ONLINE - NAO COBRAR");
   } else {
-    data.push(receiptPair(`| Cobrar na entrega`, ` |`));
-    data.push(receiptPair(`|   ${normalizeText2(pmName).toUpperCase()}`, `R$ ${fmtMoney(totalVal)} |`));
-    const changeFor = order.change_for || order.changeFor;
-    if (changeFor > 0) {
-      data.push(receiptPair("|   TROCO:", `R$ ${fmtMoney(Math.max(0, changeFor - totalVal))} |`));
+    pushSimplePaymentRow(data, settings, normalizeText2(pmName).toUpperCase(), false, chargeAmount);
+    if (prepaidAmount > 0 && pendingAmount > 0) {
+      data.push(CMD.ALIGN_CENTER, `JA PAGO NO APP R$ ${fmtMoney(prepaidAmount)}
+`, CMD.ALIGN_LEFT);
     }
+    pushMarketplaceChangeRows(data, settings, cols, changeFor, due);
   }
-  data.push(separatorEqual);
-  emptyLine();
+  data.push(separator);
   if (cd == null ? void 0 : cd.customerDocument) {
-    data.push("Informacoes Adicionais\n");
-    data.push("Incluir CPF na nota fiscal:\n");
-    data.push(`${cd.customerDocument}
+    data.push(`CPF NA NOTA: ${cd.customerDocument}
 `);
-    emptyLine();
-    data.push(separatorHifen);
+    data.push(separator);
   }
   data.push(CMD.ALIGN_CENTER);
   data.push(CMD.TXT_NORMAL);
-  emptyLine();
-  data.push("Impresso por: Pedidos Hub\n");
-  data.push("@pedidoshub\n");
+  data.push("Pedidos Hub | @pedidoshub\n");
   data.push(CMD.ALIGN_LEFT);
-  emptyLine();
   appendDeliveryDispatchBarcode(data, order, settings);
-  appendMarketplaceCoupon(data, order, getPrinterCols(settings), settings);
+  appendMarketplaceCoupon(data, order, cols, settings);
   for (let i = 0; i < settings.feedLines; i++) {
     data.push("\n");
   }
@@ -39590,10 +40025,17 @@ function generateNinetyNineFoodPrintData(order, settings = getPrintSettings()) {
   const data = [];
   const cols = getPrinterCols(settings);
   const receiptPair = (left, right, width = cols) => padPair(left, right, width);
-  const separatorEqual = "-".repeat(cols) + "\n";
-  const separatorHifen = "-".repeat(cols) + "\n";
-  const emptyLine = () => data.push("\n");
-  const fmtMoney = (val) => (Number(val) || 0).toFixed(2).replace(".", ",");
+  const separator = "-".repeat(cols) + "\n";
+  const is58mm = settings.paperWidth <= 32;
+  const itemRows = (build) => withCompactReceiptGrid(is58mm, build);
+  const { on: LARGE_ITEM_ON, off: LARGE_ITEM_OFF } = getLargeItemCommands(settings);
+  const pushItemRows = (rows) => {
+    data.push(LARGE_ITEM_ON, EMPH_ON);
+    rows.forEach((line) => data.push(`${line}
+`));
+    data.push(EMPH_OFF, LARGE_ITEM_OFF);
+  };
+  const fmtMoney = formatReceiptMoney;
   const fmtTsShort = (seconds) => {
     const n = Number(seconds);
     if (!Number.isFinite(n) || n <= 0) return "";
@@ -39622,105 +40064,134 @@ function generateNinetyNineFoodPrintData(order, settings = getPrintSettings()) {
   const deliveryEta = fmtTsShort(cd.expected_arrived_eta || raw.expected_arrived_eta);
   const cookEta = fmtTsShort(cd.expected_cook_eta || raw.expected_cook_eta);
   const orderType = order.order_type || order.orderType;
+  const isPickup = orderType === "balcao" || orderType === "pickup" || Number(cd.fulfillment_mode ?? raw.fulfillment_mode) === 1;
   const deliveryBy = Number(cd.delivery_type || raw.delivery_type) === 1 ? "99Food" : "Loja";
   data.push(CMD.RESET);
   applyReceiptPrintArea(data, settings);
-  applyReceiptFont(data, settings, "A");
+  applyReceiptTextStyle(data, settings);
   data.push(CMD.ALIGN_CENTER);
-  data.push(CMD.TXT_NORMAL);
   if (settings.storeName) {
-    data.push(CMD.medium_ON);
+    data.push(EMPH_ON);
     data.push(`${normalizeText2(settings.storeName).toUpperCase()}
 `);
-    data.push(CMD.medium_OFF);
+    data.push(EMPH_OFF);
   }
-  const expandedOrderNumber = pushExpressoOrderNumberSize(data, order, settings);
-  data.push(CMD.medium_ON);
-  data.push(`PEDIDO #${displayId}
-`);
-  data.push(CMD.medium_OFF);
-  popExpressoOrderNumberSize(data, expandedOrderNumber);
-  data.push(`${orderType === "balcao" ? "RETIRADA" : "ENTREGA"} - ${deliveryBy}
-`);
-  emptyLine();
-  data.push(separatorHifen);
+  pushOrderHeadline(data, settings, isPickup ? "RETIRADA" : "ENTREGA", `#${normalizeText2(String(displayId))}`);
+  data.push(CMD.ALIGN_CENTER, "* 99FOOD *\n");
+  if (!isPickup) data.push(deliveryBy === "99Food" ? "ENTREGADOR 99FOOD\n" : "ENTREGADOR DA LOJA\n");
+  data.push(CMD.ALIGN_LEFT);
+  data.push(separator);
   data.push(CMD.ALIGN_LEFT);
   data.push(`Pedido feito as ${formatTimeBR(created)}
 `);
   if (cookEta || deliveryEta) {
-    data.push(CMD.medium_ON);
     data.push("PRAZOS\n");
-    data.push(CMD.medium_OFF);
-    if (cookEta) data.push(`Preparo ate ${cookEta}
+    if (isPickup) {
+      if (cookEta) data.push(`Pronto ate ${cookEta}
 `);
-    if (deliveryEta) data.push(`Entrega ate ${deliveryEta}
+      if (deliveryEta) data.push(`Retirada ate ${deliveryEta}
 `);
+    } else {
+      if (cookEta) data.push(`Preparo ate ${cookEta}
+`);
+      if (deliveryEta) data.push(`Entrega ate ${deliveryEta}
+`);
+    }
   }
-  emptyLine();
-  data.push(CMD.medium_ON);
-  data.push(`CLIENTE: ${cName}
-`);
-  data.push(CMD.medium_OFF);
+  data.push(EMPH_ON);
+  formatReceiptLabeledRowsInline("CLIENTE:", cName, cols).forEach((line) => data.push(`${line}
+`));
+  data.push(EMPH_OFF);
   if (cPhone) data.push(`TEL: ${normalizeText2(cPhone)}
 `);
-  if (cd.pickup_code) data.push(`CODIGO COLETA: ${normalizeText2(cd.pickup_code)}
+  const pickupCode99 = normalizeText2(String(cd.pickup_code ?? "")).trim();
+  const handoverCode99 = normalizeText2(String(cd.handover_code ?? "")).trim();
+  data.push(EMPH_ON);
+  if (pickupCode99 && pickupCode99 === handoverCode99) {
+    data.push(`CODIGO: ${pickupCode99}
 `);
-  if (cd.handover_code) data.push(`CODIGO ENTREGA: ${normalizeText2(cd.handover_code)}
+  } else {
+    if (pickupCode99) data.push(`CODIGO COLETA: ${pickupCode99}
 `);
+    if (handoverCode99) data.push(`${isPickup ? "CODIGO CLIENTE" : "CODIGO ENTREGA"}: ${handoverCode99}
+`);
+  }
   if (cd.locator) data.push(`LOCALIZADOR: ${normalizeText2(cd.locator)}
 `);
-  data.push(separatorHifen);
+  data.push(EMPH_OFF);
+  data.push(separator);
+  const street99 = normalizeText2(order.street || order.address || addr.street_name || addr.poi_display_name || addr.poi_address || "").trim();
+  const number99 = normalizeText2(order.number || order.address_number || order.addressNumber || addr.street_number || addr.house_number || "").trim();
+  const streetHasNumber = Boolean(number99) && street99.endsWith(number99) && /(^|[\s,])$/.test(street99.slice(0, street99.length - number99.length));
+  const streetLine99 = [street99, streetHasNumber ? "" : number99].filter(Boolean).join(", ");
+  const rawComplement99 = String(order.complement || addr.complement || "").trim();
+  const rawReference99 = String(order.reference || addr.reference || "").trim();
+  let complement99 = rawComplement99;
+  if (rawReference99 && rawComplement99.includes(rawReference99)) {
+    complement99 = rawComplement99.split("\u2014").map((part) => part.trim()).filter((part) => part && part !== rawReference99).join(" - ");
+  }
+  const bairro99 = order.neighborhood || addr.district || addr.city || "";
   const addressLines = [
-    order.street || order.address || addr.street_name || addr.poi_display_name || addr.poi_address,
-    order.number || order.address_number || order.addressNumber || addr.street_number || addr.house_number,
-    order.neighborhood || addr.district || addr.city,
-    order.complement || addr.complement,
-    order.reference || addr.reference,
-    addr.postal_code || addr.postalCode
-  ].filter(Boolean).map((v) => normalizeText2(v));
+    ["END:", streetLine99],
+    ["BAIRRO:", bairro99],
+    ["COMPL:", complement99],
+    ["REF:", rawReference99]
+  ].filter(([, value]) => Boolean(value));
   if (addressLines.length > 0) {
-    data.push(CMD.medium_ON);
     data.push("ENDERECO\n");
-    data.push(CMD.medium_OFF);
-    addressLines.forEach((line) => data.push(`${line}
+    data.push(EMPH_ON);
+    addressLines.forEach(([label, value]) => {
+      const tall = label === "BAIRRO:" && !isPickup;
+      if (tall) data.push(CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A);
+      formatReceiptLabeledRowsInline(label, value, cols).forEach((line) => data.push(`${line}
 `));
-    data.push(separatorHifen);
+      if (tall) data.push(CMD.TXT_NORMAL, getLineSpacingCommand(settings));
+    });
+    data.push(EMPH_OFF);
+    data.push(separator);
   }
   data.push(CMD.ALIGN_LEFT);
-  data.push(CMD.medium_ON);
-  data.push("ITENS DO PEDIDO\n");
-  data.push(CMD.medium_OFF);
+  if (!is58mm) {
+    data.push(`${itemRows(() => formatReceiptColumnHeader(cols, "TOTAL"))}
+`);
+    data.push(separator);
+  }
+  const getSubItems = (source) => {
+    const list = (source == null ? void 0 : source.subItems) || (source == null ? void 0 : source.sub_items) || (source == null ? void 0 : source.options) || (source == null ? void 0 : source.sub_item_list) || [];
+    return Array.isArray(list) ? list : [];
+  };
   const renderSubItems = (subItems = [], level = 1) => {
     subItems.forEach((sub) => {
       const qty = sub.quantity || sub.amount || 1;
       const name = normalizeText2(sub.name || "Complemento");
       const price = Number(sub.totalPrice ?? sub.total_price ?? 0);
-      const indent = "  ".repeat(level);
       const priceStr = price > 0 ? `R$ ${fmtMoney(price)}` : "";
-      data.push(receiptPair(`${indent}+ ${qty}x ${name}`, priceStr));
-      const nested = sub.subItems || sub.sub_items || sub.options || sub.sub_item_list || [];
-      if (Array.isArray(nested) && nested.length > 0) renderSubItems(nested, level + 1);
+      pushItemRows(formatReceiptDetailRowsWithPrice(`+ ${qty}x ${name}`, priceStr, cols, (level - 1) * 2));
+      const nested = getSubItems(sub);
+      if (nested.length > 0) renderSubItems(nested, level + 1);
     });
   };
-  (order.items || []).forEach((item) => {
+  const highlightBeverages = shouldHighlightBeveragesForPrint(order, settings);
+  const isHighlightedBeverage = (item) => highlightBeverages && isBeveragePrintItem(item, getPrintItemCategory(item));
+  const allItems = order.items || [];
+  itemRows(() => printItemsWithDetailSeparators(data, allItems.filter((item) => !isHighlightedBeverage(item)), separator, (item) => {
     const qty = item.quantity || item.amount || 1;
     const name = normalizeText2(item.name || item.product_name || item.productName || "Item");
     const total = Number(item.totalPrice ?? item.total_price ?? item.realPrice ?? 0);
-    data.push(CMD.medium_ON);
-    data.push(receiptPair(`${qty} UN ${name}`, `R$ ${fmtMoney(total)}`));
-    data.push(CMD.medium_OFF);
-    const subItems = item.subItems || item.sub_items || item.options || item.sub_item_list || [];
-    if (Array.isArray(subItems) && subItems.length > 0) renderSubItems(subItems, 1);
+    pushItemRows(formatReceiptItemRows2(`${qty}x ${name}`, `R$ ${fmtMoney(total)}`, cols));
+    const subItems = getSubItems(item);
+    if (subItems.length > 0) renderSubItems(subItems, 1);
     const obs = item.observations || item.notes || item.remark;
-    if (obs) data.push(`Obs: ${normalizeText2(obs)}
-`);
-    data.push(separatorHifen);
-  });
+    if (obs) pushItemRows(formatReceiptDetailRows(`OBS: ${normalizeText2(obs)}`, cols));
+  }));
+  pushBeverageAlertBlock(data, order, settings, allItems.filter(isHighlightedBeverage).map((item) => ({
+    ...item,
+    quantity: item.quantity || item.amount || 1,
+    totalPrice: item.totalPrice ?? item.total_price ?? item.realPrice,
+    options: getSubItems(item)
+  })), true);
   data.push(CMD.ALIGN_LEFT);
-  data.push(CMD.medium_ON);
-  data.push("TOTAL\n");
-  data.push(CMD.medium_OFF);
-  data.push(separatorEqual);
+  data.push(separator);
   const subtotal = Number(cd.order_price || Number(((_a = raw.price) == null ? void 0 : _a.order_price) || 0) / 100 || 0);
   const deliveryFee = Number(order.delivery_fee || order.deliveryFee || cd.delivery_price || 0);
   const itemDiscount = Number(cd.items_discount || 0);
@@ -39744,6 +40215,14 @@ function generateNinetyNineFoodPrintData(order, settings = getPrintSettings()) {
   const recordedTotal = Number(order.total);
   const totalVal = order.total !== null && order.total !== void 0 && Number.isFinite(recordedTotal) ? recordedTotal : calculatedTotal;
   const totalIsMerchantGross = (financial == null ? void 0 : financial.merchantAfterOffers) != null && Math.abs(totalVal - financial.merchantAfterOffers) < 0.01 && totalVal > financial.customerItemTotal;
+  const payment = normalizeText2(order.payment_method || order.paymentMethod || "Online 99Food");
+  const changeFor = Number(cd.change_for || order.change_for || order.changeFor || 0);
+  const paymentLower = payment.toLowerCase();
+  const isCash99 = Number(cd.pay_channel) === 153 || paymentLower.includes("dinheiro");
+  const payMethod99 = String(cd.pay_method ?? raw.pay_method ?? "").trim().toUpperCase();
+  const isPaid99 = cd.isPrepaid === true || order.payment_status === "paid";
+  const isRepasse99 = paymentLower.includes("repasse 99food");
+  const isCharge99 = !isRepasse99 && !isPaid99 && cd.isPrepaid === false && (/dinheiro|pos|maquin/.test(paymentLower) || payMethod99 === "OFFLINE" || payMethod99 === "2");
   data.push(receiptPair("Valor dos itens:", `R$ ${fmtMoney(subtotal)}`));
   if (deliveryFee > 0) data.push(receiptPair("Taxa de entrega:", `R$ ${fmtMoney(deliveryFee)}`));
   if (serviceFee > 0) data.push(receiptPair("Taxa de servico:", `R$ ${fmtMoney(serviceFee)}`));
@@ -39752,7 +40231,12 @@ function generateNinetyNineFoodPrintData(order, settings = getPrintSettings()) {
   if (itemDiscount > 0) data.push(receiptPair("Desconto itens:", `- R$ ${fmtMoney(itemDiscount)}`));
   if (deliveryDiscount > 0) data.push(receiptPair("Desconto entrega:", `- R$ ${fmtMoney(deliveryDiscount)}`));
   if (couponDiscount > 0) data.push(receiptPair("Cupom:", `- R$ ${fmtMoney(couponDiscount)}`));
-  data.push(receiptPair(totalIsMerchantGross ? "VENDA LOJA APOS OFERTAS:" : "TOTAL REGISTRADO CLIENTE:", `R$ ${fmtMoney(totalVal)}`));
+  if (!isCharge99) data.push(CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A);
+  data.push(EMPH_ON, receiptPair(totalIsMerchantGross ? "VENDA LOJA APOS OFERTAS:" : "TOTAL:", `R$ ${fmtMoney(totalVal)}`), EMPH_OFF);
+  if (!isCharge99) {
+    data.push(CMD.TXT_NORMAL);
+    applyReceiptTextStyle(data, settings);
+  }
   if (financial) data.push(receiptPair("CLIENTE PAGA PELOS ITENS:", `R$ ${fmtMoney(financial.customerItemTotal)}`));
   if ((financial == null ? void 0 : financial.storeFunded) != null) data.push(receiptPair("Desconto pago pela loja:", `- R$ ${fmtMoney(financial.storeFunded)}`));
   if ((financial == null ? void 0 : financial.platformFunded) != null) data.push(receiptPair("Desconto coberto 99Food:", `R$ ${fmtMoney(financial.platformFunded)}`));
@@ -39760,353 +40244,35 @@ function generateNinetyNineFoodPrintData(order, settings = getPrintSettings()) {
     data.push(receiptPair("GANHOS LOJA APOS OFERTAS:", `R$ ${fmtMoney(financial.merchantAfterOffers)}`));
     data.push("Antes das taxas. Repasse: ver 99Food.\n");
   }
-  data.push(separatorEqual);
-  emptyLine();
+  data.push(separator);
   data.push(CMD.ALIGN_LEFT);
-  data.push(CMD.medium_ON);
-  data.push("PAGAMENTO\n");
-  data.push(CMD.medium_OFF);
-  data.push(separatorEqual);
-  const payment = normalizeText2(order.payment_method || order.paymentMethod || "Online 99Food");
-  const changeFor = Number(cd.change_for || order.change_for || order.changeFor || 0);
-  data.push(receiptPair(payment.toUpperCase(), payment.toLowerCase().includes("repasse 99food") ? "(A REPASSAR)" : payment.toLowerCase().includes("dinheiro") ? `R$ ${fmtMoney(totalVal)}` : "(PAGO)"));
-  if (changeFor > 0) data.push(receiptPair("LEVAR TROCO:", `R$ ${fmtMoney(changeFor)}`));
-  if (Number(cd.pay_channel) === 153 || payment.toLowerCase().includes("dinheiro")) {
-    data.push("Se a entrega for 99Food e houver dinheiro,\n");
-    data.push("confirme recebimento do entregador no app.\n");
+  if (isRepasse99) {
+    data.push(receiptPair(payment.toUpperCase(), "(A REPASSAR)"));
+  } else if (isCharge99) {
+    pushSimplePaymentRow(data, settings, payment.toUpperCase(), false, totalVal);
+    pushMarketplaceChangeRows(data, settings, cols, changeFor, totalVal);
+  } else if (isCash99) {
+    pushSimplePaymentRow(data, settings, payment.toUpperCase(), isPaid99);
+  } else {
+    pushSimplePaymentRow(data, settings, marketplacePaidDetail(payment), true, 0, "PAGO ONLINE - NAO COBRAR");
   }
-  data.push(separatorEqual);
+  if (!isPickup && Number(cd.delivery_type ?? raw.delivery_type) === 1 && isCash99) {
+    wrapReceiptText("DINHEIRO COM ENTREGADOR 99: CONFIRMAR NO APP", cols).forEach((line) => data.push(`${line}
+`));
+  }
+  data.push(separator);
   if (order.notes || order.observations || raw.remark) {
-    emptyLine();
-    data.push(CMD.medium_ON);
+    data.push(EMPH_ON);
     data.push(`OBS: ${normalizeText2(order.notes || order.observations || raw.remark)}
 `);
-    data.push(CMD.medium_OFF);
+    data.push(EMPH_OFF);
   }
   if (cd.need_cutlery) data.push("Cliente pediu talheres.\n");
   data.push(CMD.ALIGN_LEFT);
-  emptyLine();
-  data.push("Impresso por:\n");
-  data.push("Pedidos Hub . Desenvolvido por Pedidos Hub\n");
-  data.push("@pedidoshub\n");
-  emptyLine();
+  data.push(CMD.ALIGN_CENTER, "Pedidos Hub | @pedidoshub\n", CMD.ALIGN_LEFT);
   appendDeliveryDispatchBarcode(data, order, settings);
-  appendMarketplaceCoupon(data, order, getPrinterCols(settings), settings);
+  appendMarketplaceCoupon(data, order, cols, settings);
   for (let i = 0; i < settings.feedLines; i++) data.push("\n");
-  if (settings.autoCut) data.push(CMD.CUT_FULL);
-  return applyReceiptMargins(data, settings);
-}
-function parsePrintRecord(value) {
-  if (!value) return {};
-  if (typeof value === "object" && !Array.isArray(value)) return value;
-  if (typeof value !== "string") return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-function getTableClosePrintMeta(order) {
-  const customData = parsePrintRecord((order == null ? void 0 : order.customData) || (order == null ? void 0 : order.custom_data));
-  const tableClose = parsePrintRecord(customData.tableClose || customData.table_close);
-  const layout = String((order == null ? void 0 : order._printLayout) || customData.printLayout || customData.print_layout || "").trim();
-  const isTableClose = layout === "table-close" || tableClose.printLayout === "table-close" || tableClose.print_layout === "table-close";
-  if (!isTableClose) return null;
-  return { ...customData, tableClose };
-}
-function clampPrintText(value, width) {
-  const normalized = normalizeText2(value);
-  if (normalized.length <= width) return normalized;
-  return normalized.slice(0, Math.max(0, width - 1)) + ">";
-}
-function centerPrintText(value, width) {
-  const normalized = clampPrintText(value, width);
-  const left = Math.floor(Math.max(0, width - normalized.length) / 2);
-  return `${" ".repeat(left)}${normalized}`;
-}
-function getTableCloseMainItemName(item) {
-  const category = getPrintItemCategory(item);
-  let size = resolvePrintedItemSize(item);
-  const isPizza = isPrintedPizzaItem(item, size, category) || /\bpizzas?\b/.test(normalizeSizeCompare(category));
-  if (isPizza) {
-    if (!size) size = getPrintedPizzaSizeFromOption(item) || getPrintedPizzaSizeFromName(item);
-    const categoryText = normalizeText2(category);
-    const categoryLooksLikePizza = /\bpizzas?\b/.test(normalizeSizeCompare(categoryText));
-    let label = categoryLooksLikePizza ? categoryText.replace(/\bPIZZAS\b/g, "PIZZA") : "PIZZA";
-    if (size) {
-      const sizeText = formatPrintedItemSize(size, { uppercase: true });
-      const labelKey = normalizeSizeCompare(label);
-      const sizeKey = normalizeSizeCompare(sizeText);
-      if (sizeKey && !labelKey.split(/\s+/).includes(sizeKey)) {
-        label = `${label} ${sizeText}`;
-      }
-    }
-    return label;
-  }
-  return item.product_name || item.productName || item.name || "Item";
-}
-function formatTableCloseItemLine(item, cols, fmtMoney) {
-  const quantity = Math.max(1, Math.floor(Number(item.quantity || 1) || 1));
-  const total = Number(item.totalPrice ?? item.total_price ?? 0) || 0;
-  const unit = Number(item.unitPrice ?? item.unit_price ?? item.price ?? (quantity > 0 ? total / quantity : 0)) || 0;
-  const quantityText = String(quantity).slice(0, 3).padEnd(4, " ");
-  const unitText = fmtMoney(unit).padStart(6, " ");
-  const priceCols = 1 + unitText.length;
-  const nameWidth = Math.max(8, cols - quantityText.length - priceCols);
-  const itemName = clampPrintText(getTableCloseMainItemName(item), nameWidth).padEnd(nameWidth, " ");
-  return `${quantityText}${itemName} ${unitText}
-`;
-}
-function getTableClosePositiveMoney(...values) {
-  for (const value of values) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-  return 0;
-}
-function getTableCloseChargeValue(value) {
-  if (!value || typeof value !== "object") return 0;
-  const quantity = toPositivePrintNumber(value.quantity ?? value.qty ?? value.amount, 1);
-  const total = getTableClosePositiveMoney(
-    value.totalPrice,
-    value.total_price,
-    value.total,
-    value.amountTotal,
-    value.amount_total
-  );
-  if (total > 0) return total;
-  const unit = getTableClosePositiveMoney(
-    value.price,
-    value.unitPrice,
-    value.unit_price,
-    value.additionalPrice,
-    value.additional_price,
-    value.extraPrice,
-    value.extra_price
-  );
-  return unit > 0 ? unit * quantity : 0;
-}
-function getTableCloseBorderPrice(item) {
-  const directPrice = getPrintedBorderPrice(item);
-  if (directPrice > 0) return directPrice;
-  const borderOption = getTopLevelPrintedOptions(item).find(isPrintedPizzaBorderOption);
-  return getTableCloseChargeValue(borderOption);
-}
-function formatTableCloseChargeSuffix(value, fmtMoney) {
-  return value > 0 ? ` +R$ ${fmtMoney(value)}` : "";
-}
-function wrapTableCloseDetailLine(text, cols, indent = "  ") {
-  const normalized = normalizeText2(text).replace(/\s+/g, " ").trim();
-  if (!normalized) return [];
-  const width = Math.max(8, cols - indent.length);
-  const words = normalized.split(" ");
-  const lines = [];
-  let current = "";
-  words.forEach((word) => {
-    if (!word) return;
-    if (!current && word.length > width) {
-      for (let index = 0; index < word.length; index += width) {
-        lines.push(word.slice(index, index + width));
-      }
-      return;
-    }
-    const candidate = current ? `${current} ${word}` : word;
-    if (candidate.length <= width) {
-      current = candidate;
-      return;
-    }
-    if (current) lines.push(current);
-    if (word.length > width) {
-      for (let index = 0; index < word.length; index += width) {
-        const chunk = word.slice(index, index + width);
-        if (chunk.length === width) lines.push(chunk);
-        else current = chunk;
-      }
-    } else {
-      current = word;
-    }
-  });
-  if (current) lines.push(current);
-  return lines.map((line) => `${indent}${line}
-`);
-}
-function formatTableCloseItemDetailLines(item, order, cols, fmtMoney) {
-  const details = [];
-  const itemName = item.product_name || item.productName || item.name || "";
-  const itemCategory = getPrintItemCategory(item);
-  let size = resolvePrintedItemSize(item);
-  const isPizza = isPrintedPizzaItem(item, size, itemCategory) || /\bpizzas?\b/.test(normalizeSizeCompare(itemCategory));
-  if (!size && isPizza) {
-    size = getPrintedPizzaSizeFromOption(item) || getPrintedPizzaSizeFromName(item);
-  }
-  if (size && !isPizza && !shouldHidePrintedItemSize(item, size)) {
-    details.push(...wrapTableCloseDetailLine(`TAM: ${formatPrintedItemSize(size, { uppercase: true })}`, cols));
-  }
-  const borderName = getPrintedBorderName(item);
-  if (borderName) {
-    const borderPrice = getTableCloseBorderPrice(item);
-    details.push(...wrapTableCloseDetailLine(
-      `BORDA: ${normalizeText2(borderName)}${formatTableCloseChargeSuffix(borderPrice, fmtMoney)}`,
-      cols
-    ));
-  }
-  const flavorItems = getPrintedPizzaFlavorItems(item, itemName, size, itemCategory);
-  if (flavorItems.length > 0) {
-    const fraction = formatPrintedFlavorSharePrefixForItem(item, flavorItems.length);
-    flavorItems.forEach((flavor) => {
-      const flavorName = typeof flavor === "string" ? flavor : flavor.name || "";
-      if (!flavorName) return;
-      const prefix = flavorItems.length === 1 ? "SABOR: " : fraction;
-      details.push(...wrapTableCloseDetailLine(`${prefix}${normalizeText2(flavorName)}`, cols));
-    });
-  }
-  if (Array.isArray(item.extras)) {
-    item.extras.filter((extra) => !isPrintedBorderDuplicateOption(item, extra)).forEach((extra) => {
-      const extraName = getPrintedOptionDisplayName(extra) || String(extra || "").trim();
-      if (!extraName) return;
-      const quantity = toPositivePrintNumber((extra == null ? void 0 : extra.quantity) ?? (extra == null ? void 0 : extra.qty) ?? (extra == null ? void 0 : extra.amount), 1);
-      const charge = getTableCloseChargeValue(extra);
-      details.push(...wrapTableCloseDetailLine(
-        `+ ${quantity}x ${normalizeText2(extraName)}${formatTableCloseChargeSuffix(charge, fmtMoney)}`,
-        cols
-      ));
-    });
-  }
-  if (Array.isArray(item.options)) {
-    item.options.filter((option) => !shouldSkipStructuredPizzaOption(item, option)).forEach((option) => {
-      const optionName = getPrintedOptionDisplayName(option) || String(option || "").trim();
-      if (!optionName) return;
-      const quantity = getPrintedOptionQuantity(item, option, order);
-      const charge = getTableCloseChargeValue(option);
-      details.push(...wrapTableCloseDetailLine(
-        `+ ${quantity}x ${normalizeText2(optionName)}${formatTableCloseChargeSuffix(charge, fmtMoney)}`,
-        cols
-      ));
-    });
-  }
-  const pizzaCustomizations = item.pizzaCustomizations || item.pizza_customizations;
-  const printablePizzaCustomizations = filterPrintedBorderCustomizations(item, pizzaCustomizations);
-  if (printablePizzaCustomizations.length > 0) {
-    const customizationsByStep = collectPrintedCustomizationCountsByStep(
-      printablePizzaCustomizations,
-      (value) => normalizeText2(value || "")
-    );
-    Object.entries(customizationsByStep).forEach(([stepName, optionCounts]) => {
-      const options = Object.entries(optionCounts);
-      if (!stepName || options.length === 0) return;
-      details.push(...wrapTableCloseDetailLine(`${stepName}:`, cols, "   "));
-      options.forEach(([optionName, count]) => {
-        details.push(...wrapTableCloseDetailLine(`+ ${count}x ${optionName}`, cols, "    "));
-      });
-    });
-  }
-  const observation = item.observations || item.obs;
-  if (observation) {
-    details.push(...wrapTableCloseDetailLine(`OBS: ${normalizeText2(observation)}`, cols));
-  }
-  return details;
-}
-function getTableCloseDurationMinutes(meta, closedAt) {
-  var _a, _b;
-  const openedAtValue = ((_a = meta.tableClose) == null ? void 0 : _a.openedAt) || ((_b = meta.tableClose) == null ? void 0 : _b.opened_at);
-  if (!openedAtValue) return null;
-  const openedAt = parseOrderDate(openedAtValue);
-  const diffMs = closedAt.getTime() - openedAt.getTime();
-  if (!Number.isFinite(diffMs) || diffMs < 0) return null;
-  return Math.max(1, Math.round(diffMs / 6e4));
-}
-function generateTableClosePrintData(order, meta, settings = getPrintSettings()) {
-  order = { ...order, items: consolidateSimpleOrderItems(order.items || []) };
-  const data = [];
-  const cols = getPrinterCols(settings);
-  const separator = "-".repeat(cols) + "\n";
-  const separatorHeavy = "-".repeat(cols) + "\n";
-  const fmtMoney = (val) => (Number(val) || 0).toFixed(2).replace(".", ",");
-  const tableClose = meta.tableClose || {};
-  const isExpressoLanches = isExpressoLanchesOrder(order, settings);
-  const closedAt = parseOrderDate(tableClose.closedAt || tableClose.closed_at || order.closed_at || /* @__PURE__ */ new Date());
-  const tableNumber = tableClose.tableNumber ?? tableClose.table_number ?? order.table_number ?? order.tableNumber ?? "";
-  const guestCount = Math.max(1, Math.floor(Number(tableClose.guestCount ?? tableClose.guest_count ?? meta.tableGuestCount ?? meta.table_guest_count ?? 1) || 1));
-  const total = Number(tableClose.total ?? order.total ?? 0) || 0;
-  const perPerson = total / guestCount;
-  const operatorName = order.operator_name || order.operatorName || order.mesa_operator || order.mesaOperator || order.waiter_name || order.waiterName || "";
-  const paymentMethod = tableClose.paymentMethodName || tableClose.payment_method_name || order.payment_method_label || formatPaymentMethodForPrint(order, order.payment_method || order.paymentMethod || "");
-  const durationMinutes = getTableCloseDurationMinutes(meta, closedAt);
-  data.push(CMD.RESET);
-  applyReceiptPrintArea(data, settings);
-  applyReceiptTextStyle(data, settings);
-  data.push(CMD.ALIGN_CENTER);
-  data.push("***\n");
-  data.push(CMD.medium_ON);
-  data.push(`${centerPrintText("*** CONTROLE INTERNO ***", cols)}
-`);
-  data.push(CMD.medium_OFF);
-  if (settings.showStoreName && settings.storeName) {
-    data.push(`${centerPrintText(settings.storeName, cols)}
-`);
-  }
-  if (settings.showStorePhone) {
-    data.push(`${centerPrintText(`FONE: ${settings.showStorePhone}`, cols)}
-`);
-  }
-  data.push(CMD.ALIGN_LEFT);
-  data.push(separatorHeavy);
-  const tableOrderNumber = order.order_number || order.orderNumber || order.id || "";
-  if (isExpressoLanches) {
-    data.push(centerPrintText(`MESA: ${tableNumber}`, cols) + "\n");
-    data.push(CMD.TXT_DOUBLE_H);
-    data.push(centerPrintText(`PED:${tableOrderNumber}`, cols) + "\n");
-    data.push(CMD.TXT_NORMAL);
-    applyReceiptTextStyle(data, settings);
-  } else {
-    data.push(centerPrintText(`MESA: ${tableNumber}  (PED:${tableOrderNumber})`, cols) + "\n");
-  }
-  if (operatorName) data.push(`OPERADOR: ${normalizeText2(operatorName)}
-`);
-  data.push(`FECH.: ${formatDateTimeBR(closedAt)}
-`);
-  if (paymentMethod) data.push(`PAGTO.: ${normalizeText2(paymentMethod)}
-`);
-  data.push(separatorHeavy);
-  data.push("QTD ".padEnd(4, " "));
-  const itemHeaderWidth = Math.max(8, cols - 4 - 1 - 6);
-  data.push("ITENS".padEnd(itemHeaderWidth, " "));
-  data.push(" VL.UN\n");
-  data.push(separator);
-  (order.items || []).forEach((item) => {
-    data.push(formatTableCloseItemLine(item, cols, fmtMoney));
-    formatTableCloseItemDetailLines(item, order, cols, fmtMoney).forEach((line) => data.push(line));
-    data.push(separator);
-  });
-  const serviceFee = Number(order.service_fee || tableClose.serviceFeeAmt || tableClose.service_fee_amt || 0) || 0;
-  const couvert = Number(order.couvert || tableClose.couvertAmt || tableClose.couvert_amt || 0) || 0;
-  if (serviceFee > 0 || couvert > 0) {
-    if (serviceFee > 0) data.push(padPair("TAXA SERVICO:", fmtMoney(serviceFee), cols));
-    if (couvert > 0) data.push(padPair("COUVERT:", fmtMoney(couvert), cols));
-    data.push(separator);
-  }
-  data.push(CMD.ALIGN_CENTER);
-  data.push(CMD.medium_ON);
-  data.push(`VALOR TOTAL ====> ${fmtMoney(total)}
-`);
-  data.push(CMD.medium_OFF);
-  data.push(separator);
-  data.push(CMD.ALIGN_LEFT);
-  if (durationMinutes !== null) data.push(padPair("PERM    :", `${durationMinutes} min`, cols));
-  data.push(padPair("PESSOAS:", String(guestCount).padStart(3, "0"), cols));
-  data.push(padPair("R$/PESS:", fmtMoney(perPerson), cols));
-  data.push("\n");
-  if (operatorName) data.push(`ATENDENTE: ${normalizeText2(operatorName)}
-`);
-  data.push("\n");
-  data.push("Servico/Gorjeta nao obrigatorio\n");
-  data.push("Aguarde a emissao do cupom fiscal\n");
-  if (settings.customFooter) data.push(`${normalizeText2(settings.customFooter)}
-`);
-  data.push("Pedidos Hub - www.pedidoshub.com\n");
-  const finalFeedLines = settings.paperWidth <= 32 ? Math.min(settings.feedLines, 1) : settings.feedLines;
-  for (let i = 0; i < finalFeedLines; i++) data.push("\n");
   if (settings.autoCut) data.push(CMD.CUT_FULL);
   return applyReceiptMargins(data, settings);
 }
@@ -40124,6 +40290,7 @@ function wrapWorkshopReceiptText(value, cols, prefix = "") {
   const words = normalizeText2(String(value ?? "")).split(/\s+/).filter(Boolean);
   if (words.length === 0) return [];
   const lines = [];
+  const cont = " ".repeat(prefix.length);
   let current = prefix;
   for (const word of words) {
     const candidate = current.trim() ? `${current}${current.endsWith(" ") ? "" : " "}${word}` : `${prefix}${word}`;
@@ -40132,7 +40299,7 @@ function wrapWorkshopReceiptText(value, cols, prefix = "") {
       continue;
     }
     if (current.trim()) lines.push(current);
-    current = `${prefix}${word}`;
+    current = `${cont}${word}`;
   }
   if (current.trim()) lines.push(current);
   return lines;
@@ -40164,31 +40331,34 @@ function generateWorkshopReceiptData(order, settings = getPrintSettings()) {
   const customerName = normalizeText2(order.customer_name || order.customerName || "Cliente nao informado");
   const customerPhone = normalizeText2(order.customer_phone || order.customerPhone || "");
   const total = Number(order.total ?? order.total_price ?? 0) || 0;
-  const money = (value) => `R$ ${value.toFixed(2).replace(".", ",")}`;
+  const money = (value) => `R$ ${value.toFixed(2).replace(".", ",").replace(/\B(?=(\d{3})+(?!\d))(?=.*,)/g, ".")}`;
   const data = [CMD.RESET];
   applyReceiptPrintArea(data, settings);
   applyReceiptTextStyle(data, settings);
   data.push(CMD.ALIGN_CENTER);
-  data.push(CMD.medium_ON);
+  data.push(EMPH_ON);
   wrapWorkshopReceiptText(storeName, cols).forEach((line) => data.push(`${line}
 `));
-  data.push(CMD.medium_OFF);
+  data.push(EMPH_OFF);
   if (storeAddress) {
     wrapWorkshopReceiptText(storeAddress, cols).forEach((line) => data.push(`${line}
 `));
   }
   data.push("\n");
-  data.push(CMD.medium_ON);
+  data.push(EMPH_ON);
   data.push("RECIBO DE PAGAMENTO\n");
-  data.push(CMD.medium_OFF);
+  data.push(EMPH_OFF);
   data.push(CMD.ALIGN_LEFT);
   data.push(separator);
-  if (isExpressoLanches) data.push(CMD.TXT_DOUBLE_H);
-  data.push(`ATENDIMENTO: ${formatStoreOrderPrintLabel(order)}
+  const attendanceLabel = formatStoreOrderPrintLabel(order, "");
+  if (attendanceLabel) {
+    if (isExpressoLanches) data.push(CMD.TXT_DOUBLE_H);
+    data.push(`ATENDIMENTO: ${attendanceLabel}
 `);
-  if (isExpressoLanches) {
-    data.push(CMD.TXT_NORMAL);
-    applyReceiptTextStyle(data, settings);
+    if (isExpressoLanches) {
+      data.push(CMD.TXT_NORMAL);
+      applyReceiptTextStyle(data, settings);
+    }
   }
   data.push(`EMISSAO: ${new Intl.DateTimeFormat("pt-BR", {
     timeZone: PRINT_TIMEZONE,
@@ -40213,25 +40383,42 @@ function generateWorkshopReceiptData(order, settings = getPrintSettings()) {
   if (vehicle.plate) data.push(`PLACA: ${normalizeText2(vehicle.plate)}
 `);
   data.push(separator);
-  data.push(CMD.medium_ON);
+  data.push(EMPH_ON);
   data.push("SERVICOS E PECAS\n");
-  data.push(CMD.medium_OFF);
+  data.push(EMPH_OFF);
   for (const item of items) {
     const quantity = Math.max(1, Number(item.quantity || 1) || 1);
     const itemName = normalizeText2(item.product_name || item.productName || item.name || "Item");
     const itemTotal = Number(
       item.totalPrice ?? item.total_price ?? quantity * Number(item.unitPrice ?? item.unit_price ?? item.price ?? 0)
     ) || 0;
-    const left = `${quantity}x ${itemName}`;
+    const left = `${quantity}X ${itemName}`;
     const right = money(itemTotal);
+    data.push(EMPH_ON);
     if (left.length + right.length + 1 <= cols) {
       data.push(padPair(left, right, cols));
-    } else {
-      wrapWorkshopReceiptText(left, cols).forEach((line) => data.push(`${line}
+    } else if (cols <= 32) {
+      formatReceiptItemRows2(left, right, cols).forEach((line) => data.push(`${line}
 `));
-      data.push(`${" ".repeat(Math.max(0, cols - right.length))}${right}
+    } else {
+      const lead = `${quantity}X `;
+      const words = itemName.split(/\s+/).filter(Boolean);
+      let first = "";
+      while (words.length && `${lead}${first}${first ? " " : ""}${words[0]}`.length + 1 + right.length <= cols) {
+        first = `${first}${first ? " " : ""}${words.shift()}`;
+      }
+      if (first) {
+        data.push(padPair(`${lead}${first}`, right, cols));
+        wrapWorkshopReceiptText(words.join(" "), cols, " ".repeat(lead.length)).forEach((line) => data.push(`${line}
+`));
+      } else {
+        wrapWorkshopReceiptText(left, cols).forEach((line) => data.push(`${line}
+`));
+        data.push(`${" ".repeat(Math.max(0, cols - right.length))}${right}
 `);
+      }
     }
+    data.push(EMPH_OFF);
     const itemVehicle = getWorkshopReceiptItemVehicle(item);
     if (itemVehicle.model) {
       wrapWorkshopReceiptText(itemVehicle.model, cols, "  VEICULO: ").forEach((line) => data.push(`${line}
@@ -40246,10 +40433,11 @@ function generateWorkshopReceiptData(order, settings = getPrintSettings()) {
     }
   }
   data.push(separator);
-  data.push(CMD.medium_ON);
-  data.push(padPair("TOTAL", money(total), cols));
-  data.push(CMD.medium_OFF);
-  data.push(`PAGAMENTO: ${formatPaymentMethodForPrint(order, "A combinar")}
+  data.push(CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A, EMPH_ON);
+  data.push(padPair("TOTAL:", money(total), cols));
+  data.push(EMPH_OFF, CMD.TXT_NORMAL);
+  applyReceiptTextStyle(data, settings);
+  data.push(`PAGAMENTO: ${normalizeText2(formatPaymentMethodForPrint(order, "A combinar"))}
 `);
   data.push(separator);
   data.push(CMD.ALIGN_CENTER);
@@ -40271,10 +40459,6 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
     return generateIfoodPrintData(order, settings);
   }
   const cd = order.customData || order.custom_data || {};
-  const tableCloseMeta = getTableClosePrintMeta(order);
-  if (tableCloseMeta) {
-    return generateTableClosePrintData(order, tableCloseMeta, settings);
-  }
   const isNinetyNine = order.origin === "99food" || order.order_origin === "99food" || order.source === "99food" || cd.platform === "99food";
   if (isNinetyNine) {
     return generateNinetyNineFoodPrintData(order, settings);
@@ -40295,11 +40479,16 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
   const isExpressoLanches = isExpressoLanchesOrder(order, settings);
   const isCasaDaPizza = isCasaDaPizzaOrder(order);
   const isTableOrder = orderType === "mesa";
+  const isTableBill = cd.printKind === "table-bill";
   const showFinancialItemPrice = settings.showItemPrice || isTableOrder;
   const isLargeFont = settings.fontSize === "large";
-  const LARGE_ITEM_ON = isLargeFont ? CMD.TXT_DOUBLE_H : "";
-  const LARGE_ITEM_OFF = isLargeFont ? CMD.TXT_NORMAL : "";
+  const LARGE_ITEM_ON = isLargeFont ? `${CMD.TXT_DOUBLE_H}${TALL_LINE_SPACING_A}` : "";
+  const LARGE_ITEM_OFF = isLargeFont ? `${CMD.TXT_NORMAL}${getLineSpacingCommand(settings)}` : "";
   const restoreReceiptTextStyle = () => applyReceiptTextStyle(data, settings);
+  const pushSeparatorOnce = (sep) => {
+    const last = [...data].reverse().find((chunk) => typeof chunk === "string" && !chunk.includes(CMD.ESC) && !chunk.includes(CMD.GS) && chunk.trim());
+    if (!/^\s*(.)\1+\s*\n$/.test(String(last || ""))) data.push(sep);
+  };
   const pushMediumOn = (enabled = true) => {
     if (enabled) data.push(CMD.medium_ON);
   };
@@ -40309,27 +40498,12 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
   const emptyLine = () => {
     data.push("\n");
   };
-  const fmtMoney = (val) => (val || 0).toFixed(2).replace(".", ",");
+  const fmtMoney = (val) => (val || 0).toFixed(2).replace(".", ",").replace(/\B(?=(\d{3})+(?!\d))(?=.*,)/g, ".");
+  const pushTallPaymentLines = (texts) => pushTallCenteredLines(data, settings, texts);
   const pushPaidNotice = () => {
-    pushReceiptBand(data, settings, "JA PAGO - NAO COBRAR", { bold: true });
+    pushTallPaymentLines(["JA PAGO - NAO COBRAR"]);
   };
-  const pushSimplePaymentRow = (paymentMethod, isPaid) => {
-    const paidStatus = "JA PAGO - NAO COBRAR";
-    const paymentLabel = `PAGAMENTO: ${paymentMethod}`;
-    const geometry = getReceiptGeometry(settings);
-    data.push(CMD.ALIGN_LEFT);
-    restoreReceiptTextStyle();
-    if (isPaid) {
-      formatReceiptPair(paymentLabel, "", geometry).forEach((line) => data.push(`${line}
-`));
-      pushReceiptBand(data, settings, paidStatus, { bold: true });
-      return;
-    }
-    formatReceiptPair(paymentLabel, "", geometry, { fallbackRightAlign: "center" }).forEach((line) => data.push(`${line}
-`));
-    restoreReceiptTextStyle();
-    data.push(CMD.ALIGN_LEFT);
-  };
+  let printedChargeAmount = 0;
   let lastItemHeading = "";
   const pushItemHeading = (left, right) => {
     lastItemHeading = left;
@@ -40340,9 +40514,9 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
     data.push(EMPH_OFF);
     data.push(LARGE_ITEM_OFF);
   };
-  const pushItemDetail = (text, _indent = "  ") => {
+  const pushItemDetail = (text, _indent = "  ", extraIndent = 0) => {
     data.push(LARGE_ITEM_ON, EMPH_ON);
-    formatReceiptDetailRows(text, cols).forEach((line) => data.push(`${line}
+    formatReceiptDetailRows(text, cols, extraIndent).forEach((line) => data.push(`${line}
 `));
     data.push(EMPH_OFF, LARGE_ITEM_OFF);
   };
@@ -40395,7 +40569,8 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
   restoreReceiptTextStyle();
   const isService = orderType === "servico" || orderType === "servi\xE7o";
   const orderNum = String(order.order_number || order.orderNumber || order.id || "0").padStart(3, "0");
-  const orderPrintLabel = formatStoreOrderPrintLabel(order);
+  const aiqfomeFallbackLabel = isAiqfome && !(order.order_number || order.orderNumber) && cd.aiqfomeDisplayNumber ? `#${normalizeText2(String(cd.aiqfomeDisplayNumber)).trim()}` : "";
+  const orderPrintLabel = formatStoreOrderPrintLabel(order, "") || aiqfomeFallbackLabel;
   const scheduledDate = getOrderScheduledPrintDate(order);
   const customerOrdersCount = getCustomerOrdersCount(order);
   let typeTopLabel = "RETIRADA";
@@ -40432,31 +40607,21 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
   }
   if (!isService) {
     if (isAiqfome) {
+      const aiqfomeNumber = normalizeText2(String(cd.aiqfomeDisplayNumber ?? "")).trim();
       data.push(CMD.medium_ON);
-      data.push("* AIQFOME *\n");
+      data.push(aiqfomeNumber ? `* AIQFOME ${aiqfomeNumber} *
+` : "* AIQFOME *\n");
       data.push(CMD.medium_OFF);
     }
     restoreReceiptTextStyle();
     const storeId = String(order.admin_client_id || order.adminClientId || order.store_id || order.storeId || "");
-    data.push(
-      CMD.ALIGN_CENTER,
-      CMD.INVERSE_OFF,
-      orderNumberSize(`PEDIDO ${orderPrintLabel}`, settings),
-      EMPH_ON,
-      `PEDIDO ${orderPrintLabel}
-`,
-      EMPH_OFF,
-      CMD.TXT_NORMAL
-    );
-    restoreReceiptTextStyle();
-    if (isTableOrder) {
-      pushTableBand(data, settings, typeTopLabel, true);
-      data.push(CMD.ALIGN_CENTER);
-    } else {
-      pushTableBand(data, settings, typeTopLabel);
-      data.push(CMD.ALIGN_CENTER);
+    pushOrderHeadline(data, settings, typeTopLabel, orderPrintLabel);
+    pushScheduledHeadline(data, settings, orderType, scheduledDate);
+    data.push(CMD.ALIGN_CENTER);
+    if (isTableBill) {
+      data.push(EMPH_ON, "CONFERENCIA DE CONTA\n", EMPH_OFF);
     }
-    if (settings.showDateTime) {
+    if (!isTableBill) {
       data.push(`CRIADO EM: ${formatDateTimeBR(parseOrderDate(order.created_at || order.createdAt))}
 `);
     }
@@ -40470,11 +40635,12 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
   const hasCustomerName = !["", "cliente", "consumidor"].includes(String(order.customer_name || order.customerName || "").trim().toLowerCase());
   const hasTableCustomer = hasCustomerName && cName !== normalizeText2(typeTopLabel).toUpperCase();
   if (settings.showCustomerInfo !== false && (!isTableOrder || hasTableCustomer || cPhone)) {
-    pushInfoLines(data, formatReceiptLabeledRows("CLIENTE:", cName, infoCols), settings);
-    if (cPhone) pushInfoLines(data, formatReceiptLabeledRows("TELEFONE:", cPhone, infoCols), settings);
+    pushInfoLines(data, formatReceiptLabeledRowsInline("CLIENTE:", cName, infoCols), settings);
+    const printedPhone = orderType === "delivery" ? formatPrintedPhone(cPhone) : cPhone;
+    if (cPhone) pushInfoLines(data, formatReceiptLabeledRowsInline("TELEFONE:", printedPhone, infoCols), settings);
   }
   if (customerOrdersCount !== null) {
-    pushInfoLines(data, formatReceiptLabeledRows("PEDIDOS NA LOJA:", String(customerOrdersCount), infoCols), settings);
+    pushInfoLines(data, formatReceiptLabeledRowsInline("PEDIDOS NA LOJA:", String(customerOrdersCount), infoCols), settings);
   }
   if (orderType === "delivery" && settings.showDeliveryInfo) {
     const rua = order.street || "";
@@ -40482,6 +40648,17 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
     const bairro = order.neighborhood || "";
     const complemento = order.complement || "";
     const referencia = order.reference || "";
+    const enderecoBruto = order.address || order.customer_address;
+    const enderecoLivre = !rua && typeof enderecoBruto === "string" ? normalizeText2(enderecoBruto) : "";
+    const flatAddress = (value) => normalizeText2(value).replace(/\s+/g, " ");
+    const showBairro = Boolean(bairro) && !(enderecoLivre && flatAddress(enderecoLivre).includes(flatAddress(bairro)));
+    const pushTallBairro = () => {
+      if (!showBairro) return;
+      data.push(CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A);
+      formatReceiptLabeledRowsInline("BAIRRO:", bairro, cols).forEach((line) => data.push(`${line}
+`));
+      data.push(CMD.TXT_NORMAL, getLineSpacingCommand(settings));
+    };
     data.push(EMPH_ON);
     if (isCompactCounterLayout) {
       if (rua) {
@@ -40489,9 +40666,12 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
         if (numero) endParts.push(normalizeText2(numero));
         formatReceiptLabeledRows("END:", endParts.join(", "), cols).forEach((line) => data.push(`${line}
 `));
+      } else if (enderecoLivre) {
+        formatReceiptLabeledRows("END:", enderecoLivre, cols).forEach((line) => data.push(`${line}
+`));
       }
+      pushTallBairro();
       const areaParts = [];
-      if (bairro) areaParts.push(["BAIRRO:", normalizeText2(bairro)]);
       if (complemento) areaParts.push(["COMPL:", normalizeText2(complemento)]);
       if (referencia) areaParts.push(["REF:", normalizeText2(referencia)]);
       if (areaParts.length > 0) {
@@ -40504,16 +40684,14 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
 `)));
         }
       }
-    } else if (rua) {
-      formatReceiptLabeledRows("RUA:", rua, cols).forEach((line) => data.push(`${line}
+    } else {
+      const endereco = rua ? `${normalizeText2(rua)}, ${numero ? normalizeText2(numero) : "S/N"}` : enderecoLivre;
+      if (endereco) formatReceiptLabeledRowsInline("END:", endereco, cols).forEach((line) => data.push(`${line}
 `));
-      formatReceiptLabeledRows("NUMERO:", numero || "S/N", cols).forEach((line) => data.push(`${line}
+      pushTallBairro();
+      if (complemento) formatReceiptLabeledRowsInline("COMPL:", complemento, cols).forEach((line) => data.push(`${line}
 `));
-      if (bairro) formatReceiptLabeledRows("BAIRRO:", bairro, cols).forEach((line) => data.push(`${line}
-`));
-      if (complemento) formatReceiptLabeledRows("COMPL:", complemento, cols).forEach((line) => data.push(`${line}
-`));
-      if (referencia) formatReceiptLabeledRows("REF:", referencia, cols).forEach((line) => data.push(`${line}
+      if (referencia) formatReceiptLabeledRowsInline("REF:", referencia, cols).forEach((line) => data.push(`${line}
 `));
     }
     data.push(EMPH_OFF);
@@ -40627,14 +40805,15 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
     }
     return applyReceiptMargins(data, settings);
   }
-  data.push(CMD.ALIGN_CENTER);
-  data.push(CMD.medium_ON);
-  data.push("ITENS DO PEDIDO\n");
-  data.push(CMD.medium_OFF);
   data.push(CMD.ALIGN_LEFT);
-  data.push(`${formatReceiptColumnHeader(cols, showFinancialItemPrice ? "TOTAL" : void 0)}
+  const counterRows = (build) => withCompactReceiptGrid(is58mm, build);
+  if (isCompactCounterLayout) {
+    pushSeparatorOnce(separatorFine);
+  } else {
+    data.push(`${counterRows(() => formatReceiptColumnHeader(cols, showFinancialItemPrice ? "TOTAL" : void 0))}
 `);
-  data.push(separatorFine);
+    data.push(separatorFine);
+  }
   const looksLikeTechnicalId = (val) => /^[a-z]{1,4}_|^\d{10,}$|_[0-9a-f]{8,}$/i.test(val || "");
   const globalGroupedPromos = /* @__PURE__ */ new Map();
   const promoHighlightedBeverages = /* @__PURE__ */ new Map();
@@ -40678,15 +40857,16 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
       itemsByCategory["_all"].push(item);
     }
   });
-  const printCounterItem = (item, isPromoChild = false, category = "") => {
+  const printCounterItem = (item, isPromoChild = false, category = "") => counterRows(() => printCounterItemRows(item, isPromoChild, category));
+  const printCounterItemRows = (item, isPromoChild, category) => {
     const showItemObservation = isPromoChild ? settings.showOrderNotes !== false : settings.showItemNotes;
     if (Array.isArray(item.marmitaSelections) && item.marmitaSelections.length > 0) {
       const isComboChoiceMarmita = isComboChoiceMarmitaPrintItem(item);
       const name2 = normalizeText2(item.product_name || item.productName || item.name || "Item");
       const visibleItemName = isMarmitaSelectionChoiceItem(item) ? normalizeText2(getMarmitaSelectionBaseLabel(item)) : name2;
-      const qty = settings.showItemQuantity ? item.quantity || 1 : 1;
+      const qty = item.quantity || 1;
       const totalItem2 = item.totalPrice || item.total_price || qty * (item.unitPrice || item.unit_price || 0);
-      const headerLine = settings.showItemQuantity ? `${isComboChoiceMarmita && qty === 1 ? "" : `${qty}x `}${visibleItemName}` : `${visibleItemName}`;
+      const headerLine = (settings.showItemQuantity || qty > 1) && !(isComboChoiceMarmita && qty === 1) ? `${qty}x ${visibleItemName}` : `${visibleItemName}`;
       if (!isComboChoiceMarmita) {
         pushItemHeading(headerLine, showFinancialItemPrice ? `R$ ${fmtMoney(totalItem2)}` : void 0);
       }
@@ -40756,7 +40936,7 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
       }
       const itemObservation2 = getPrintableItemObservation(item);
       if (showItemObservation && itemObservation2) {
-        pushLabeledDetail("Obs:", normalizeText2(itemObservation2));
+        pushItemDetail(`OBS: ${normalizeText2(itemObservation2)}`);
       }
       return;
     }
@@ -40770,21 +40950,21 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
       const itemUnit = (item.unit || "").toLowerCase();
       const isCustomUnit = itemUnit && !["kg", "g", "l", "ml", "un"].includes(itemUnit);
       if (isCustomUnit) {
-        qtyDisplay = settings.showItemQuantity ? `${weightVal}${itemUnit}` : "";
+        qtyDisplay = `${weightVal}${itemUnit}`;
         totalItem = item.totalPrice || item.total_price || weightVal * unitPrice;
       } else {
         if (weightVal < 1e3) {
-          qtyDisplay = settings.showItemQuantity ? `${weightVal}g` : "";
+          qtyDisplay = formatPrintedWeight(weightVal);
           totalItem = item.totalPrice || item.total_price || weightVal / 1e3 * unitPrice;
         } else {
           const weightKg = weightVal / 1e3;
-          qtyDisplay = settings.showItemQuantity ? `${weightKg.toFixed(3).replace(".", ",")}kg` : "";
+          qtyDisplay = formatPrintedWeight(weightVal);
           totalItem = item.totalPrice || item.total_price || weightKg * unitPrice;
         }
       }
     } else {
       const qty = item.quantity || 1;
-      qtyDisplay = settings.showItemQuantity ? `${qty}x` : "";
+      qtyDisplay = settings.showItemQuantity || qty > 1 ? `${qty}x` : "";
       totalItem = resolvePrintableItemTotal(item);
     }
     let size = resolvePrintedItemSize(item);
@@ -40847,14 +41027,44 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
     }
     if (hasFlavors) {
       const count = flavorsArr.length;
-      const fraction = formatPrintedFlavorSharePrefixForItem(item, count);
+      const { fraction, piecesSuffix } = formatPrintedFlavorShareForItem(item, count);
       flavorsArr.forEach((f) => {
         const fName = typeof f === "string" ? f : f.name || "";
-        pushItemDetail(`${fraction}${normalizeText2(fName)}`);
+        const flavorLine = `${fraction}${normalizeText2(fName)}${piecesSuffix}`;
+        const flavorPrice = typeof f === "string" ? 0 : firstPrintableMoney(f.price, f.unitPrice, f.unit_price);
+        const isPromotionPizza = isPromoChild || Boolean(
+          item.promotionId || item.promotion_id || item.promotionName || item.promotion_name
+        );
+        if (showFinancialItemPrice && flavorPrice > 0 && count > 1 && !isPromotionPizza) {
+          const price = `R$ ${fmtMoney(flavorPrice)}`;
+          const indent = getReceiptGridLayout(cols).itemStart;
+          const cont = indent + fraction.length;
+          const textWidth = Math.max(8, cols - indent - price.length - 1);
+          const words = normalizeText2(flavorLine).replace(/\s+/g, " ").trim().split(" ");
+          let first = "";
+          while (words.length && `${first}${first ? " " : ""}${words[0]}`.length <= textWidth) {
+            first = `${first}${first ? " " : ""}${words.shift()}`;
+          }
+          if (!first && words.length) {
+            first = words[0].slice(0, textWidth);
+            words[0] = words[0].slice(textWidth);
+            if (!words[0]) words.shift();
+          }
+          data.push(LARGE_ITEM_ON, EMPH_ON);
+          data.push(`${`${" ".repeat(indent)}${first}`.padEnd(cols - price.length)}${price}
+`);
+          if (words.length) {
+            wrapReceiptColumnText(words.join(" "), Math.max(8, cols - cont)).forEach((line) => data.push(`${" ".repeat(cont)}${line}
+`));
+          }
+          data.push(EMPH_OFF, LARGE_ITEM_OFF);
+        } else {
+          pushItemDetail(flavorLine);
+        }
       });
     }
     getPrintedComboChoiceLines(item, false).forEach((choice) => {
-      pushItemDetail(choice);
+      pushItemDetail(choice.text, "  ", choice.level * 2);
     });
     if (!isOrganizedPizzaBlock && borderName) {
       pushBorderLine(normalizeText2(borderName));
@@ -40904,23 +41114,25 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
       const giftName = item.giftProductName || item.gift_product_name;
       pushLabeledDetail("Promocao:", normalizeText2(promoName));
       if (promoType === "percentage" || promoType === "fixed" || promoType === "promo_price") {
-        if (origPrice > 0) {
-          pushLabeledDetail("De:", `R$ ${fmtMoney(origPrice)}`, "    ");
+        if (showFinancialItemPrice) {
+          if (origPrice > 0) {
+            pushLabeledDetail("De:", `R$ ${fmtMoney(origPrice)}`, "    ");
+          }
+          pushLabeledDetail("Por:", `R$ ${fmtMoney(totalItem)}`, "    ");
         }
-        pushLabeledDetail("Por:", `R$ ${fmtMoney(totalItem)}`, "    ");
       } else if (promoType === "buy_x_get_y") {
         pushLabeledDetail("Regra:", `Leve ${buyQty || 3} pague ${payQty || 2}`, "    ");
-        pushLabeledDetail("Total:", `R$ ${fmtMoney(totalItem)}`, "    ");
+        if (showFinancialItemPrice) pushLabeledDetail("Total:", `R$ ${fmtMoney(totalItem)}`, "    ");
       } else if (promoType === "free_shipping") {
         pushLabeledDetail("Beneficio:", "Frete gratis", "    ");
-        pushLabeledDetail("Total:", `R$ ${fmtMoney(totalItem)}`, "    ");
+        if (showFinancialItemPrice) pushLabeledDetail("Total:", `R$ ${fmtMoney(totalItem)}`, "    ");
       } else if (promoType === "gift" && giftName) {
         pushLabeledDetail("Brinde:", normalizeText2(giftName), "    ");
-        pushLabeledDetail("Total:", `R$ ${fmtMoney(totalItem)}`, "    ");
+        if (showFinancialItemPrice) pushLabeledDetail("Total:", `R$ ${fmtMoney(totalItem)}`, "    ");
       } else if (promoType === "combo") {
         pushLabeledDetail("Tipo:", "Combo", "    ");
-        pushLabeledDetail("Total:", `R$ ${fmtMoney(totalItem)}`, "    ");
-      } else {
+        if (showFinancialItemPrice) pushLabeledDetail("Total:", `R$ ${fmtMoney(totalItem)}`, "    ");
+      } else if (showFinancialItemPrice) {
         if (origPrice > 0) {
           pushLabeledDetail("De:", `R$ ${fmtMoney(origPrice)}`, "    ");
         }
@@ -40929,20 +41141,14 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
     }
     const itemObservation = getPrintableItemObservation(item);
     if (showItemObservation && itemObservation) {
-      pushLabeledDetail("Obs:", normalizeText2(itemObservation));
+      pushItemDetail(`OBS: ${normalizeText2(itemObservation)}`);
     }
   };
-  let printedPromoGroups = 0;
-  globalGroupedPromos.forEach((itemsInPromo, promoName) => {
-    if (printedPromoGroups > 0) emptyLine();
-    printedPromoGroups += 1;
+  const printCounterPromoBlock = (itemsInPromo, promoName) => {
     pushSectionTitle(`PROMO: ${promoName}`);
     const mainItems = itemsInPromo.filter((i) => !i.isGift);
     const giftItems = itemsInPromo.filter((i) => i.isGift);
-    mainItems.forEach((item, index) => {
-      if (index > 0) data.push(separatorFine);
-      printCounterItem(item, true, "_promos");
-    });
+    printItemsWithDetailSeparators(data, mainItems, separatorFine, (item) => printCounterItem(item, true, "_promos"));
     giftItems.forEach((i) => {
       data.push(LARGE_ITEM_ON);
       data.push(CMD.medium_ON);
@@ -40953,17 +41159,28 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
       data.push(CMD.medium_OFF);
       data.push(LARGE_ITEM_OFF);
     });
-  });
-  Object.keys(itemsByCategory).sort().forEach((category, catIdx) => {
-    const categoryRepeatsEveryItem = categoryRepeatsItemNames(category, itemsByCategory[category]);
+  };
+  const counterCategoryKeys = Object.keys(itemsByCategory);
+  const showEveryCategoryTitle = counterCategoryKeys.length > 1 && counterCategoryKeys.some((category) => !categoryRepeatsItemNames(category, itemsByCategory[category]));
+  const counterItemPosition = new Map((order.items || []).map((item, index) => [item, index]));
+  const counterBlocks = [
+    ...Array.from(globalGroupedPromos.entries()).map(([promoName, items]) => ({ promoName, category: "", items })),
+    ...counterCategoryKeys.map((category) => ({ promoName: "", category, items: itemsByCategory[category] }))
+  ].sort((a, b) => (counterItemPosition.get(a.items[0]) ?? 0) - (counterItemPosition.get(b.items[0]) ?? 0));
+  counterBlocks.forEach(({ promoName, category, items }, blockIdx) => {
+    const previousBlock = counterBlocks[blockIdx - 1];
+    if (promoName) {
+      if (previousBlock == null ? void 0 : previousBlock.promoName) emptyLine();
+      else if (previousBlock) data.push(separatorFine);
+      printCounterPromoBlock(items, promoName);
+      return;
+    }
+    const categoryRepeatsEveryItem = !showEveryCategoryTitle && categoryRepeatsItemNames(category, items);
     if (settings.groupByCategory && category !== "_all") {
-      if (catIdx > 0 || globalGroupedPromos.size > 0) data.push(separatorFine);
+      if (blockIdx > 0) data.push(separatorFine);
       if (!categoryRepeatsEveryItem) pushSectionTitle(category, true, isBeverageCategory(category));
     }
-    itemsByCategory[category].forEach((item, itemIndex) => {
-      if (itemIndex > 0) data.push(separatorFine);
-      printCounterItem(item, false, category);
-    });
+    printItemsWithDetailSeparators(data, items, separatorFine, (item) => printCounterItem(item, false, category));
   });
   if (highlightBeveragesForDelivery) {
     const beverageItems = (order.items || []).filter((item) => {
@@ -40975,100 +41192,31 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
       const isBeverage = isBeveragePrintItem(item, cat);
       return isBeverage;
     });
-    if (beverageItems.length > 0) {
-      const beverageCols = getReceiptGeometry(settings, getReceiptFontFamily(settings.fontSize)).contentColumns;
-      let bevHeader = "ATENCAO";
-      if (orderType === "delivery") bevHeader = "ATENCAO MOTOBOY";
-      emptyLine();
-      pushDarkReceiptBand(data, settings, bevHeader);
-      const beverageRows = beverageItems.map((item) => {
-        const qty = Number(item.quantity ?? 1) || 1;
-        const name = normalizeText2(item.product_name || item.productName || item.name || "Bebida");
-        let size = resolvePrintedItemSize(item);
-        if (size && looksLikeTechnicalId(size)) size = null;
-        if (size && shouldHidePrintedItemSize(item, size)) size = null;
-        const sizeStr = size ? ` (${formatPrintedItemSize(size)})` : "";
-        const rawTotal = item.totalPrice ?? item.total_price;
-        const rawUnit = item.unitPrice ?? item.unit_price ?? item.price ?? 0;
-        const parsedTotal = rawTotal === void 0 || rawTotal === null ? NaN : Number(rawTotal);
-        const parsedUnit = Number(rawUnit);
-        const total = Number.isFinite(parsedTotal) ? parsedTotal : Number.isFinite(parsedUnit) ? parsedUnit * qty : 0;
-        const details = getMarmitaSelectionDisplayGroups(item).map((group) => {
-          const options = group.options.map((option) => `${option.count}x ${option.name}`).join(", ");
-          const extra = group.extraTotal > 0 ? ` (+R$ ${fmtMoney(group.extraTotal)})` : "";
-          return `${group.step}: ${options}${extra}`;
-        });
-        return {
-          left: `${qty}x ${name}${sizeStr}`,
-          right: `R$ ${fmtMoney(total)}`,
-          details
-        };
-      });
-      const pushBeverageDetails = (row) => {
-        if (row.details.length === 0) return;
-        data.push(CMD.DOUBLE_STRIKE_OFF);
-        data.push(CMD.medium_OFF);
-        row.details.forEach((detail) => {
-          wrapCompactPrintEntries([detail], beverageCols - 2).forEach((line) => {
-            data.push(`  ${line}
-`);
-          });
-        });
-        data.push(CMD.medium_ON);
-        data.push(CMD.DOUBLE_STRIKE_ON);
-      };
-      data.push(CMD.medium_ON);
-      data.push(CMD.DOUBLE_STRIKE_ON);
-      const [firstBeverage, ...remainingBeverages] = beverageRows;
-      if (firstBeverage) {
-        const labelWithFirst = `LEVAR BEBIDAS: ${firstBeverage.left}`;
-        if (labelWithFirst.length + firstBeverage.right.length + 1 <= beverageCols) {
-          data.push(EMPH_ON, receiptPair(labelWithFirst, firstBeverage.right, beverageCols), EMPH_OFF);
-        } else {
-          data.push("LEVAR BEBIDAS:\n");
-          data.push(EMPH_ON, receiptPair(firstBeverage.left, firstBeverage.right, beverageCols), EMPH_OFF);
-        }
-        pushBeverageDetails(firstBeverage);
-      } else {
-        data.push("LEVAR BEBIDAS:\n");
-      }
-      remainingBeverages.forEach((row) => {
-        data.push(EMPH_ON, receiptPair(row.left, row.right, beverageCols), EMPH_OFF);
-        pushBeverageDetails(row);
-      });
-      data.push(CMD.DOUBLE_STRIKE_OFF);
-      data.push(CMD.medium_OFF);
-      restoreReceiptTextStyle();
-    }
+    pushBeverageAlertBlock(data, order, settings, beverageItems, showFinancialItemPrice);
   }
   if (settings.showOrderNotes !== false && (order.notes || order.observations)) {
     const cleanNotes = normalizeText2(removePaymentFeeFromNotes(order.notes || order.observations));
     if (cleanNotes) {
       data.push(separatorHeavy);
-      data.push(CMD.ALIGN_CENTER);
-      data.push(LARGE_ITEM_ON);
-      data.push(CMD.medium_ON);
-      data.push("OBSERVACOES\n");
-      data.push(CMD.medium_OFF);
-      data.push(`${cleanNotes}
-`);
-      data.push(LARGE_ITEM_OFF);
+      data.push(CMD.ALIGN_LEFT);
+      data.push(LARGE_ITEM_ON, EMPH_ON);
+      formatReceiptLabeledRowsInline("OBSERVACOES:", cleanNotes, cols).forEach((line) => data.push(`${line}
+`));
+      data.push(EMPH_OFF, LARGE_ITEM_OFF);
       data.push(CMD.ALIGN_LEFT);
     }
   }
   if (order.internal_notes) {
     data.push(separatorHeavy);
-    data.push(CMD.ALIGN_CENTER);
-    data.push(LARGE_ITEM_ON);
-    data.push(CMD.medium_ON);
-    data.push("** NOTA INTERNA **\n");
-    data.push(CMD.medium_OFF);
-    data.push(`${normalizeText2(order.internal_notes)}
-`);
-    data.push(LARGE_ITEM_OFF);
+    data.push(CMD.ALIGN_LEFT);
+    data.push(LARGE_ITEM_ON, EMPH_ON);
+    formatReceiptLabeledRowsInline("NOTA INTERNA:", order.internal_notes, cols).forEach((line) => data.push(`${line}
+`));
+    data.push(EMPH_OFF, LARGE_ITEM_OFF);
     data.push(CMD.ALIGN_LEFT);
   }
   const printableTotal = resolvePrintableOrderTotal(order);
+  let totalHeightIndex = -1;
   if (settings.showTotal) {
     data.push(separator);
     data.push(CMD.ALIGN_LEFT);
@@ -41088,49 +41236,77 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
     if (!isNaN(acrescimoNum) && acrescimoNum > 0) {
       data.push(receiptPair("ACRESCIMO:", `R$ ${fmtMoney(acrescimoNum)}`));
     }
-    const discountAffectingTotal = getDiscountAffectingOrderTotal(
-      order,
-      Number(order.subtotal) || 0,
-      Number(order.discount) || 0
+    const totalParts = getPrintableOrderTotalParts(order);
+    const customData = order.customData || order.custom_data || {};
+    const discountAffectingTotal = totalParts.discount;
+    const cashback = Math.min(
+      discountAffectingTotal,
+      Number(
+        customData.loyalty_cashback_amount ?? customData.loyalty_cashback_applied ?? customData.loyaltyCashbackAmount ?? order.loyalty_cashback_amount ?? order.loyaltyCashbackAmount ?? customData.cashback ?? order.cashback ?? 0
+      ) || 0
     );
-    if (discountAffectingTotal > 0) {
-      data.push(receiptPair("DESCONTO:", `-R$ ${fmtMoney(discountAffectingTotal)}`));
+    const discountWithoutCashback = Math.round((discountAffectingTotal - cashback) * 100) / 100;
+    if (discountWithoutCashback > 0) {
+      const discountValue = `-R$ ${fmtMoney(discountWithoutCashback)}`;
+      const couponCode = normalizeText2(String(order.coupon_code || order.couponCode || "")).trim();
+      const couponLabel = `DESCONTO (CUPOM ${couponCode}):`;
+      if (couponCode && couponLabel.length + 1 + discountValue.length <= cols) {
+        data.push(receiptPair(couponLabel, discountValue));
+      } else {
+        data.push(receiptPair("DESCONTO:", discountValue));
+        if (couponCode) wrapReceiptColumnText(`CUPOM: ${couponCode}`, cols).forEach((line) => data.push(`${line}
+`));
+      }
+    }
+    if (cashback > 0) {
+      data.push(receiptPair("CASHBACK:", `-R$ ${fmtMoney(cashback)}`));
     }
     if (Number(order.couvert) > 0) {
       data.push(receiptPair("COUVERT ARTISTICO:", `R$ ${fmtMoney(order.couvert)}`));
     }
     if (Number(order.service_fee) > 0) {
-      const pctCounter = order.service_fee_percent ? ` (${order.service_fee_percent}%)` : "";
-      data.push(receiptPair(`TAXA DE SERVICO${pctCounter}:`, `R$ ${fmtMoney(order.service_fee)}`));
+      const pctNum = Number(order.service_fee_percent);
+      const pct = Number.isFinite(pctNum) && pctNum > 0 ? pctNum.toLocaleString("pt-BR", { maximumFractionDigits: 2 }) : "";
+      const serviceValue = `R$ ${fmtMoney(order.service_fee)}`;
+      const longServiceLabel = pct ? `TAXA DE SERVICO (${pct}%):` : "TAXA DE SERVICO:";
+      const serviceLabel = longServiceLabel.length + 1 + serviceValue.length <= cols ? longServiceLabel : pct ? `SERVICO ${pct}%:` : "SERVICO:";
+      data.push(receiptPair(serviceLabel, serviceValue));
+    }
+    if (totalParts.additionalCharges > 0) {
+      data.push(receiptPair("TAXAS ADICIONAIS:", `R$ ${fmtMoney(totalParts.additionalCharges)}`));
+    }
+    if (totalParts.smallOrderFee > 0) {
+      data.push(receiptPair("TAXA PEDIDO MINIMO:", `R$ ${fmtMoney(totalParts.smallOrderFee)}`));
+    }
+    if (totalParts.tip > 0) {
+      data.push(receiptPair("GORJETA:", `R$ ${fmtMoney(totalParts.tip)}`));
     }
     if (!isCompactCounterLayout) data.push(separatorFine);
     data.push(CMD.ALIGN_LEFT);
-    data.push(CMD.TXT_DOUBLE_H);
+    totalHeightIndex = data.length;
+    data.push(CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A);
     data.push(EMPH_ON);
     data.push(receiptPair("TOTAL:", `R$ ${fmtMoney(printableTotal)}`, cols));
     data.push(EMPH_OFF);
     data.push(CMD.TXT_NORMAL);
     restoreReceiptTextStyle();
     data.push(CMD.ALIGN_LEFT);
+    const tableBillGuests = Math.floor(Number(cd.tableGuestCount ?? cd.table_guest_count) || 0);
+    if (isTableBill && order.payment_status !== "paid" && tableBillGuests > 1 && printableTotal > 0) {
+      const perPerson = `R$ ${fmtMoney(printableTotal / tableBillGuests)}`;
+      const oneLine = `PESSOAS: ${tableBillGuests}  POR PESSOA ${perPerson}`;
+      data.push(EMPH_ON);
+      if (oneLine.length <= cols) data.push(`${oneLine}
+`);
+      else {
+        data.push(receiptPair("PESSOAS:", String(tableBillGuests)));
+        data.push(receiptPair("POR PESSOA:", perPerson));
+      }
+      data.push(EMPH_OFF);
+    }
     const loyaltyPoints = getOrderLoyaltyPointsPrintLine(order);
     if (loyaltyPoints) {
       data.push(receiptPair(loyaltyPoints.label, `${loyaltyPoints.points} PONTOS`));
-    }
-    const cashbackAmount = order.cashback || order.cashback_discount || order.cashbackDiscount || 0;
-    const customData = order.customData || order.custom_data || {};
-    const cashbackFromCustom = customData.cashback || customData.cashback_discount || customData.cashbackDiscount || 0;
-    const totalCashback = Number(cashbackAmount) || Number(cashbackFromCustom) || 0;
-    if (totalCashback > 0) {
-      data.push(separatorFine);
-      pushReceiptSectionTitle(data, settings, "CASHBACK");
-      restoreReceiptTextStyle();
-      const totalBeforeCashback = printableTotal + totalCashback;
-      data.push(receiptPair("Total:", `R$ ${fmtMoney(totalBeforeCashback)}`));
-      data.push(receiptPair("Desconto Cashback:", `-R$ ${fmtMoney(totalCashback)}`));
-      data.push(CMD.medium_ON);
-      data.push(receiptPair("Valor Pago:", `R$ ${fmtMoney(printableTotal)}`));
-      data.push(CMD.medium_OFF);
-      data.push(separatorFine);
     }
     if (paymentSchedule) {
       data.push(separatorFine);
@@ -41157,13 +41333,27 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
     const pmPrintable = formatPaymentMethodForPrint(order, pmRaw || "Pagamento");
     const pmLower = pmRaw.toLowerCase();
     const isSplitPayment = receiptSplits.length > 0 || pmLower === "split" || pmLower.includes("m\xFAltipl") || pmLower.includes("multipl") || pmLower.includes("divid");
-    const isPaidOnline = pmLower === "pix_online" || pmLower.includes("online") || pmLower.includes("pago");
+    const isOnlineMethod = pmLower === "pix_online" || pmLower === "mp_pix" || pmLower.includes("online");
     const isManuallyPaid = order.payment_status === "paid";
+    const isPaidOnline = isOnlineMethod && isManuallyPaid;
     const hasRemainingPayment = paymentSchedule && remainingAmount > 0;
     const receiptChargeAmount = paymentSchedule ? amountDueNow : printableTotal;
-    if (!isCompactCounterLayout) data.push(separatorFine);
+    const pushChangeRows = (changeFor, chargeAmount) => {
+      if (isManuallyPaid || !(changeFor > 0)) return;
+      data.push(CMD.ALIGN_LEFT);
+      data.push(receiptPair("TROCO PARA:", `R$ ${fmtMoney(changeFor)}`));
+      if (changeFor > chargeAmount + 9e-3) {
+        data.push(CMD.ALIGN_CENTER, CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A, EMPH_ON);
+        data.push(`LEVAR TROCO: R$ ${fmtMoney(changeFor - chargeAmount)}
+`);
+        data.push(EMPH_OFF, CMD.TXT_NORMAL, CMD.ALIGN_LEFT);
+        restoreReceiptTextStyle();
+      }
+    };
+    const orderChangeFor = Number(order.change_for || order.changeFor) || 0;
+    if (!isCompactCounterLayout) pushSeparatorOnce(separatorFine);
     if (isPaidOnline) {
-      pushReceiptBand(data, settings, hasRemainingPayment ? "ENTRADA PAGA" : "PAGO ONLINE - NAO COBRAR", { bold: true });
+      pushTallPaymentLines([hasRemainingPayment ? "ENTRADA PAGA" : "PAGO ONLINE - NAO COBRAR"]);
       if (hasRemainingPayment) {
         data.push(CMD.ALIGN_LEFT, EMPH_ON);
         data.push(receiptPair("COBRAR SALDO:", `R$ ${fmtMoney(remainingAmount)}`));
@@ -41172,73 +41362,77 @@ function generateCounterPrintData(order, settings = getPrintSettings()) {
       restoreReceiptTextStyle();
       data.push(CMD.ALIGN_LEFT);
     } else if (isSplitPayment) {
-      data.push(CMD.ALIGN_CENTER);
-      data.push(CMD.TXT_DOUBLE_H);
-      data.push(CMD.medium_ON);
+      data.push(CMD.ALIGN_CENTER, CMD.TXT_DOUBLE_H, TALL_LINE_SPACING_A, EMPH_ON);
       data.push(`${formatPaymentBannerText("PAGAMENTO MULTIPLO", cols)}
 `);
-      data.push(CMD.medium_OFF);
-      data.push(CMD.TXT_NORMAL);
+      data.push(EMPH_OFF, CMD.TXT_NORMAL);
       restoreReceiptTextStyle();
       data.push(CMD.ALIGN_LEFT);
       receiptSplits.forEach((s) => {
-        const name = normalizeText2(formatPaymentSplitMethodForPrint(s));
+        const name = normalizeText2(formatPaymentSplitMethodForPrint(s)).toUpperCase();
         const amt = `R$ ${fmtMoney(Number(s.amount) || 0)}`;
-        const paidStatus = s.paid === true ? " [PAGO]" : " [PENDENTE]";
-        data.push(CMD.medium_ON);
-        data.push(receiptPair(`  ${name}${paidStatus}:`, amt));
-        data.push(CMD.medium_OFF);
+        const isPaidPart = s.paid === true;
+        const status = isPaidPart ? "PAGO" : "A PAGAR";
+        if (!isPaidPart) data.push(EMPH_ON);
+        if (`${name} ${status}`.length + 1 + amt.length <= cols) {
+          data.push(`${`${name} ${status}`.padEnd(cols - amt.length)}${amt}
+`);
+        } else {
+          wrapReceiptColumnText(name, cols).forEach((line) => data.push(`${line}
+`));
+          data.push(`${`  ${status}`.padEnd(cols - amt.length)}${amt}
+`);
+        }
+        if (!isPaidPart) data.push(EMPH_OFF);
       });
-      if (isManuallyPaid) {
+      const pendingSplits = receiptSplits.filter((s) => s.paid !== true);
+      const pendingAmount = Math.round(pendingSplits.reduce((sum, s) => sum + (Number(s.amount) || 0), 0) * 100) / 100;
+      if (isManuallyPaid || pendingAmount <= 0) {
         pushPaidNotice();
+      } else {
+        printedChargeAmount = pendingAmount;
+        pushChargeLine(data, settings, "", pendingAmount);
+        const cashSplit = pendingSplits.find((s) => /dinheiro|cash|money|especie/.test(
+          normalizeText2(`${s.method_id || s.methodId || ""} ${formatPaymentSplitMethodForPrint(s)}`).toLowerCase()
+        ));
+        if (cashSplit) pushChangeRows(orderChangeFor, Number(cashSplit.amount) || 0);
       }
     } else {
       const pmLabel = normalizeText2(pmPrintable).toUpperCase();
-      pushSimplePaymentRow(pmLabel, isManuallyPaid);
-      if (paymentSchedule) {
-        data.push(CMD.medium_ON);
-        data.push(receiptPair("Cobrar agora:", `R$ ${fmtMoney(amountDueNow)}`));
-        if (remainingAmount > 0) {
-          data.push(receiptPair("Saldo entrega/ret:", `R$ ${fmtMoney(remainingAmount)}`));
-        }
-        data.push(CMD.medium_OFF);
-      }
-      const changeFor = order.change_for || order.changeFor;
-      if (changeFor > 0) {
-        data.push(separatorFine);
-        data.push(CMD.ALIGN_LEFT);
-        data.push(CMD.medium_ON);
-        data.push(receiptPair("LEVAR TROCO:", `R$ ${fmtMoney(changeFor)}`));
-        data.push(receiptPair("TROCO:", `R$ ${fmtMoney(changeFor - receiptChargeAmount)}`));
-        data.push(CMD.medium_OFF);
-        data.push(separatorFine);
-      }
+      printedChargeAmount = pushSimplePaymentRow(data, settings, pmLabel, isManuallyPaid, receiptChargeAmount);
+      pushChangeRows(orderChangeFor, receiptChargeAmount);
     }
+  }
+  if (totalHeightIndex >= 0 && printedChargeAmount > 0 && Math.abs(printedChargeAmount - printableTotal) < 5e-3) {
+    data.splice(totalHeightIndex, 2);
   }
   const lastFooterText = [...data].reverse().find((chunk) => typeof chunk === "string" && !chunk.includes(CMD.ESC) && !chunk.includes(CMD.GS));
   if (lastFooterText !== separatorHeavy && !/^(.)\1+\n$/.test(String(lastFooterText || ""))) data.push(separatorHeavy);
   data.push(CMD.ALIGN_LEFT);
   const footerMeta = (label, value) => {
     if (!value) return;
-    pushInfoLines(data, [receiptPair(`${label.padEnd(11)}|`, value, getInfoColumns(settings))], settings);
+    pushInfoLines(data, formatReceiptLabeledRowsInline(`${label}:`, value, getInfoColumns(settings)), settings);
   };
   const fOperator = order.operator_name || order.operatorName || order.mesa_operator || order.mesaOperator;
   if (settings.showOperator !== false && fOperator) {
-    footerMeta("ATENDENTE", normalizeText2(fOperator));
+    const maxOperator = getInfoColumns(settings) - "ATENDENTE:".length - 1;
+    let operatorText = normalizeText2(fOperator);
+    if (operatorText.length > maxOperator) {
+      const parts = operatorText.split(" ");
+      if (parts.length > 2) operatorText = `${parts[0]} ${parts[parts.length - 1]}`;
+      if (operatorText.length > maxOperator) operatorText = operatorText.slice(0, maxOperator).trim();
+    }
+    footerMeta("ATENDENTE", operatorText);
   }
   if (settings.showDateTime) {
-    footerMeta("IMPRESSO EM", formatDateTimeBR(/* @__PURE__ */ new Date()));
+    const printedAt = /* @__PURE__ */ new Date();
+    footerMeta("IMPRESSO", `${formatDateBR(printedAt).slice(0, 5)} ${formatTimeBR(printedAt)}`);
   }
   {
     const etaText = (cd == null ? void 0 : cd.estimated_time_text) || (cd == null ? void 0 : cd.estimatedTimeText);
-    if (etaText) {
-      footerMeta(orderType === "delivery" ? "PRAZO ENTR." : "PRAZO", normalizeText2(String(etaText)));
+    if (etaText && !scheduledDate) {
+      footerMeta(orderType === "delivery" ? "PRAZO ENTREGA" : "PRAZO", formatEstimatedTimeForPrint(etaText));
     }
-  }
-  if (scheduledDate) {
-    data.push(CMD.medium_ON);
-    footerMeta("AGENDADO", `${formatDateBR(scheduledDate)} ${formatTimeBR(scheduledDate)}`);
-    data.push(CMD.medium_OFF);
   }
   data.push(separatorFine);
   data.push(CMD.ALIGN_CENTER);
@@ -41275,9 +41469,9 @@ function generateOrderPrintData(order, printType = "counter", settings = getPrin
     return uppercasePrintTextChunks(applyEmphasisPolicy(repeat(generateKitchenPrintData(order, { sector: "bar", settings }), "bar")));
   }
   if (printType === "both") {
-    const kitchenData = repeat(generateKitchenPrintData(order, { settings }), "kitchen");
-    const counterData = repeat(generateCounterPrintData(order, settings), "counter");
-    return uppercasePrintTextChunks(applyEmphasisPolicy([...kitchenData, ...counterData]));
+    const kitchenData = applyEmphasisPolicy(repeat(generateKitchenPrintData(order, { settings }), "kitchen"));
+    const counterData = applyEmphasisPolicy(repeat(generateCounterPrintData(order, settings), "counter"));
+    return uppercasePrintTextChunks([...kitchenData, ...counterData]);
   }
   return uppercasePrintTextChunks(applyEmphasisPolicy(repeat(generateCounterPrintData(order, settings), "counter")));
 }
@@ -41477,6 +41671,9 @@ var PRINT_OPTION_ARRAY_KEYS = [
   "choices",
   "customizations",
   "additions",
+  // Adicionais do cardápio digital (ProductModal grava em item.additionals).
+  // item.extras fica de fora: a impressão já lê esse campo direto.
+  "additionals",
   "order_mandatory_items",
   "order_additional_items",
   "order_item_subitems"
@@ -41721,6 +41918,19 @@ function normalizeOrderForPrint(order, extras = {}) {
     subtotal: order.subtotal,
     delivery_fee: order.deliveryFee || order.delivery_fee,
     discount: order.discount,
+    // Taxas e acréscimos entram no TOTAL (resolvePrintableOrderTotal); sem
+    // repassá-los aqui, o papel do Hub/reimpressão mostrava o total sem as linhas.
+    // `?? undefined` evita que um null tape o valor seguinte na cadeia de acréscimo.
+    service_fee: order.service_fee ?? order.serviceFee,
+    service_fee_percent: order.service_fee_percent ?? order.serviceFeePercent,
+    couvert: order.couvert,
+    addition: order.addition ?? void 0,
+    additionValue: order.additionValue ?? void 0,
+    tip: order.tip,
+    additional_charges: order.additional_charges ?? order.additionalCharges,
+    small_order_fee: order.small_order_fee ?? order.smallOrderFee,
+    store_address: order.store_address ?? order.storeAddress,
+    coupon_code: order.couponCode || order.coupon_code || void 0,
     total: order.total,
     paymentFee,
     paymentFeeAmount: paymentFee,

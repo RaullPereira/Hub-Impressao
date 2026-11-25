@@ -400,6 +400,12 @@ class PrinterManager extends EventEmitter {
       logger.info(`[PRINT] Comando gerado internamente (tamanho): ${printBuffer.length} bytes`);
     }
 
+    // Via sem nada a imprimir (ex.: bar sem bebida): sucesso sem mandar papel.
+    if (printBuffer.length === 0) {
+      logger.info('[PRINT] Buffer vazio: nada a imprimir.');
+      return;
+    }
+
     // Envio via CUPS (se aplicável)
     if (printer.type === 'cups') {
       return new Promise((resolve, reject) => {

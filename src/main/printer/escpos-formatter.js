@@ -2,8 +2,9 @@ const CMD = {
   RESET: '\x1B@',
   FONT_A: '\x1BM\x00',
   TXT_NORMAL: '\x1D\x21\x00',
-  TXT_DOUBLE_H: '\x1D\x21\x10',
-  TXT_DOUBLE_W: '\x1D\x21\x20',
+  // GS ! n: bit 0 = altura dupla, bit 4 = largura dupla (igual ao printer.ts do web).
+  TXT_DOUBLE_H: '\x1D\x21\x01',
+  TXT_DOUBLE_W: '\x1D\x21\x10',
   TXT_BIG: '\x1D\x21\x11',
   ALIGN_LEFT: '\x1Ba\x00',
   ALIGN_CENTER: '\x1Ba\x01',

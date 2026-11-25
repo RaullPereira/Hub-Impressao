@@ -124,6 +124,100 @@ function decode(payload) {
     assert.strictEqual(payload.localFallback, undefined);
   });
 
+  // Pedido sem bebida: a via do bar vem vazia do render oficial.
+  const b64 = (text) => Buffer.from(text, 'binary').toString('base64');
+  const barOrder = {
+    ...order,
+    items: [{ name: 'Pizza Grande', category: 'Pizzas', quantity: 1, unitPrice: 100, totalPrice: 100 }]
+  };
+
+  await test('via kitchen/bar vazia não imprime e não derruba as outras vias', async () => {
+    const printed = [];
+    const released = [];
+    const telemetry = [];
+    const listener = makeListener(async () => response(200, {
+      payload: {
+        variants: {
+          kitchen: { rawContent: b64('OFICIAL-kitchen') },
+          counter: { rawContent: b64('OFICIAL-counter') },
+          bar: { rawContent: '', encoding: 'base64' }
+        }
+      }
+    }));
+    listener.printerManager = { refreshPrinters: async () => {}, print: async (job) => { printed.push(job); } };
+    listener.resolveAutoPrintPrinterId = async (route) => ({ kitchen: 'Cozinha', attendance: 'Caixa', bar: 'Bar' })[route] || null;
+    listener.claimAutoPrintLedger = async (_orderId, route) => ({ id: `claim-${route}` });
+    listener.releaseAutoPrintLedger = async (id) => { released.push(id); };
+    listener.emitAutoPrintTelemetry = (_context, details) => { telemetry.push(details); };
+    listener.printSettings = { ...listener.printSettings, barPrintEnabled: true };
+
+    const result = await listener.autoPrintPerPrinter(barOrder, 'order-1', { kitchen: 'Cozinha', attendance: 'Caixa', bar: 'Bar' }, 'teste');
+
+    assert.deepStrictEqual(printed.map((job) => [job.printer, decode(job)]).sort(), [
+      ['Caixa', 'OFICIAL-counter'],
+      ['Cozinha', 'OFICIAL-kitchen']
+    ]);
+    assert.deepStrictEqual(released, []);
+    const barTelemetry = telemetry.find((entry) => entry.via === 'bar');
+    assert.strictEqual(barTelemetry.outcome, 'empty');
+    assert.strictEqual(result.printedCount, 2);
+    assert.strictEqual(result.skippedCount, 0);
+  });
+
+  await test('reserva local: bar vazio vira skip e as outras vias saem no layout local', async () => {
+    const listener = makeListener(async () => response(500, {}));
+    const payloads = await listener.fetchRenderedPayloads('order-1', ['counter', 'bar'], barOrder);
+    assert.strictEqual(payloads.bar.skip, true);
+    assert.strictEqual(payloads.counter.localFallback, true);
+    assert.strictEqual(payloads.counter.layout, 'web');
+    assert.ok(decode(payloads.counter).toUpperCase().includes('PIZZA GRANDE'));
+  });
+
+  await test('reserva parcial mantém as vias oficiais', async () => {
+    const listener = makeListener(async (_url, options) => {
+      const body = JSON.parse(options.body);
+      if (Array.isArray(body.printTypes)) {
+        return response(200, { payload: { variants: { counter: { rawContent: b64('OFICIAL-counter') } } } });
+      }
+      return response(500, { error: 'falhou' });
+    });
+    const payloads = await listener.fetchRenderedPayloads('order-1', ['counter', 'kitchen'], order);
+    assert.strictEqual(decode(payloads.counter), 'OFICIAL-counter');
+    assert.strictEqual(payloads.counter.localFallback, undefined);
+    assert.strictEqual(payloads.kitchen.localFallback, true);
+  });
+
+  await test('reserva sem nome do pagamento não imprime o código cru', async () => {
+    for (const paymentMethod of ['7e8df6dc-c11d-4ab8-8ba1-8bf176a461cb', 'custom_1731700000000_cartao']) {
+      const listener = makeListener(async () => response(500, {}));
+      const payload = await listener.resolvePrintPayload('order-1', 'counter', null, { ...order, payment_method: paymentMethod });
+      const text = decode(payload).toUpperCase();
+      assert.ok(!text.includes(paymentMethod.toUpperCase()), paymentMethod);
+      assert.ok(!text.includes('CUSTOM_'), paymentMethod);
+      assert.ok(text.includes('A COMBINAR'), paymentMethod);
+    }
+  });
+
+  await test('reserva usa o nome da forma de pagamento quando resolve', async () => {
+    const listener = makeListener(async () => response(500, {}));
+    listener.getPaymentMethods = async () => [{ id: '7e8df6dc-c11d-4ab8-8ba1-8bf176a461cb', name: 'Vale Refeicao' }];
+    const payload = await listener.resolvePrintPayload('order-1', 'counter', null, {
+      ...order,
+      payment_method: '7e8df6dc-c11d-4ab8-8ba1-8bf176a461cb'
+    });
+    assert.ok(decode(payload).toUpperCase().includes('VALE REFEICAO'));
+  });
+
+  await test('rede lenta não segura a reserva por mais de 1,5 s', async () => {
+    const listener = makeListener(async () => response(500, {}));
+    listener.getPaymentMethods = () => new Promise(() => {});
+    const startedAt = Date.now();
+    const payload = await listener.resolvePrintPayload('order-1', 'counter', null, order);
+    const elapsed = Date.now() - startedAt;
+    assert.strictEqual(payload.localFallback, true);
+    assert.ok(elapsed < 2500, `demorou ${elapsed}ms`);
+  });
+
   console.log(`\n${passed} passed, ${failed} failed`);
   Module._load = originalLoad;
   process.exit(failed > 0 ? 1 : 0);

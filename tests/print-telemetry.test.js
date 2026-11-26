@@ -363,23 +363,26 @@ async function test(name, fn) {
       lines.length = 0;
       listener.traceIdFactory = () => 'trace-unresolved-printer';
       listener.resolveAutoPrintPrinterId = async () => null;
-      await listener.autoPrintPerPrinter({
-        id: 'order-unresolved-printer',
-        order_type: 'delivery',
-        created_at: '2026-07-14T12:00:00.000Z'
-      }, 'order-unresolved-printer', {
-        kitchen: 'Kitchen',
-        attendance: 'Counter',
-        counter: 'Counter',
-        delivery: 'Counter'
-      }, 'realtime_insert');
+      // Impressora escolhida mas fora agora: falha (nova tentativa), nao "pulada".
+      await assert.rejects(
+        () => listener.autoPrintPerPrinter({
+          id: 'order-unresolved-printer',
+          order_type: 'delivery',
+          created_at: '2026-07-14T12:00:00.000Z'
+        }, 'order-unresolved-printer', {
+          kitchen: 'Kitchen',
+          attendance: 'Counter',
+          counter: 'Counter',
+          delivery: 'Counter'
+        }, 'realtime_insert'),
+        (error) => error.printerUnavailable === true
+      );
 
       const skippedRecords = lines.map((line) => JSON.parse(line.slice('[PRINT_PERF] '.length)));
       assert.equal(skippedRecords.length, 2);
-      assert.ok(skippedRecords.every((record) => record.outcome === 'skipped'));
-      assert.ok(skippedRecords.every((record) => record.printer === ''));
+      assert.ok(skippedRecords.every((record) => record.outcome === 'failed'));
+      assert.deepEqual(new Set(skippedRecords.map((record) => record.printer)), new Set(['Kitchen', 'Counter']));
       assert.ok(skippedRecords.every((record) => Object.hasOwn(record, 'via')));
-      assert.ok(skippedRecords.every((record) => Object.hasOwn(record, 'printer')));
 
       lines.length = 0;
       const resolverError = new Error('kitchen resolver failed');

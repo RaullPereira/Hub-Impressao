@@ -51,6 +51,10 @@ const PRINTER_REFRESH_TTL_MS = 30000;
 const GESTAO_PRINT_RECOVERY_MS = 15 * 60 * 1000;
 const GESTAO_BUSINESS_CACHE_MS = 5 * 60 * 1000;
 const GESTAO_MAX_ATTEMPTS = 3;
+// Via que falhou (impressora da cozinha fora, render sem rede): o Hub tenta de
+// novo por ate 15 min. Antes a recuperacao so olhava pedidos de ate 5 min e a
+// comanda da cozinha sumia sem aviso (Pizza & Cia, 26/11: mesas sem cozinha).
+const FAILED_VIA_RETRY_MAX_AGE_MS = 15 * 60 * 1000;
 
 let createClientLoader = null;
 
@@ -548,6 +552,8 @@ class PairedPrintListener {
     this.lastHeartbeatPersistAt = 0;
     this.recoveryFloorAt = null;
     this.lostClaimSince = new Map();
+    // Pedidos com via que falhou, para nova tentativa: id -> momento da 1a falha.
+    this.failedViaRetry = new Map();
   }
 
   setPrinterManager(printerManager) {
@@ -1593,17 +1599,64 @@ class PairedPrintListener {
       return true;
     });
 
+    for (const order of eligibleOrders) {
+      await this.handleAutoPrintOrder(order, 'recovery');
+    }
+
+    await this.retryFailedViaOrders(new Set(eligibleOrders.map((order) => String(order.id))));
+
     if (!eligibleOrders.length) {
       this.touchHeartbeat();
       return;
     }
 
-    for (const order of eligibleOrders) {
-      await this.handleAutoPrintOrder(order, 'recovery');
-    }
-
     this.lastRecoveryRunAt = Date.now();
     this.touchHeartbeat();
+  }
+
+  rememberFailedViaOrder(orderId) {
+    const id = String(orderId || '');
+    if (!id || this.failedViaRetry.has(id)) return;
+    this.failedViaRetry.set(id, Date.now());
+    if (this.failedViaRetry.size > MAX_RUNTIME_CACHE) {
+      const oldest = this.failedViaRetry.keys().next().value;
+      this.failedViaRetry.delete(oldest);
+    }
+  }
+
+  // Pedidos cuja via falhou (ex.: cozinha fora) e que ja passaram da janela de
+  // 5 min da recuperacao: tenta de novo por ate 15 min desde a 1a falha. As
+  // vias ja impressas ficam reservadas no ledger, entao so a que falhou sai.
+  async retryFailedViaOrders(alreadyHandledIds = new Set()) {
+    if (!this.supabase || !this.currentPairing?.adminClientId) return;
+    if (!this.failedViaRetry.size) return;
+    const now = Date.now();
+    const ids = [];
+    for (const [id, firstFailedAt] of this.failedViaRetry) {
+      if (now - firstFailedAt > FAILED_VIA_RETRY_MAX_AGE_MS) {
+        this.failedViaRetry.delete(id);
+        logger.error(`${this.getLogContext()} Pedido ${id}: via não impressa após ${FAILED_VIA_RETRY_MAX_AGE_MS / 60000} min de tentativas. Desistindo.`);
+        continue;
+      }
+      if (!alreadyHandledIds.has(id)) ids.push(id);
+    }
+    if (!ids.length) return;
+    const { data, error } = await this.supabase
+      .from('orders')
+      .select('*')
+      .eq('admin_client_id', this.currentPairing.adminClientId)
+      .in('id', ids);
+    if (error) {
+      logger.warn(`${this.getLogContext()} Falha ao buscar pedidos para nova tentativa:`, error.message || error);
+      return;
+    }
+    for (const order of data || []) {
+      if (!order?.id || isOrderCancelled(order)) {
+        this.failedViaRetry.delete(String(order?.id || ''));
+        continue;
+      }
+      await this.handleAutoPrintOrder(order, 'failed_via_retry');
+    }
   }
 
   /**
@@ -2748,6 +2801,7 @@ class PairedPrintListener {
           return;
         }
         this.lostClaimSince.delete(orderId);
+        this.failedViaRetry.delete(orderId);
         this.processedOrderIds.add(orderId);
         this.trimRuntimeCache(this.processedOrderIds);
         logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId} processado para auto-print por impressora.`);
@@ -2869,6 +2923,7 @@ class PairedPrintListener {
       }
 
       this.lostClaimSince.delete(orderId);
+      this.failedViaRetry.delete(orderId);
       this.processedOrderIds.add(orderId);
       this.trimRuntimeCache(this.processedOrderIds);
       logger.info(`${this.getLogContext()} Pedido #${order.order_number || orderId} impresso e registrado.`);
@@ -2877,6 +2932,7 @@ class PairedPrintListener {
         `[Pairing] Falha ao imprimir automaticamente pedido #${order.order_number || orderId}:`,
         error
       );
+      this.rememberFailedViaOrder(orderId);
       if (this.isRetriablePrintError(error)) {
         this.scheduleReconnect(error);
       }
@@ -2936,6 +2992,27 @@ class PairedPrintListener {
 
       const via = result.value;
       const { printerId } = via;
+      const configuredPrinter = getAutoPrintPrinterForRoute(autoPrintMap, via.resolveType);
+      if (!printerId && configuredPrinter) {
+        // Impressora escolhida para esta via, mas fora agora (desligada, sem
+        // cabo, fora da lista do Windows). Antes a via era pulada sem reserva e
+        // o pedido ficava como processado: a comanda da cozinha nao saia nunca.
+        // Agora conta como falha e o pedido volta para nova tentativa.
+        this.emitAutoPrintTelemetry(activeTelemetry, {
+          via: via.ledgerType,
+          printer: configuredPrinter,
+          outcome: 'failed'
+        });
+        const unavailableError = new Error(
+          `Impressora da via ${via.resolveType} indisponível: ${configuredPrinter}`
+        );
+        unavailableError.printerUnavailable = true;
+        logger.warn(
+          `${this.getLogContext()} Pedido #${order.order_number || orderId}: ${unavailableError.message}. Nova tentativa em seguida.`
+        );
+        resolverFailures.push(unavailableError);
+        return;
+      }
       if (!printerId) {
         // Sem impressora explicita/disponivel para esta via → pula (sem fallback).
         this.emitAutoPrintTelemetry(activeTelemetry, {
@@ -2961,10 +3038,15 @@ class PairedPrintListener {
     let renderMs = 0;
     const renderPromise = (async () => {
       try {
-        const payloads = await this.fetchRenderedPayloads(
-          orderId,
-          availableVias.map((via) => via.printType),
-          order
+        // Render pela API da web: "fetch failed" passageiro nao pode derrubar
+        // o pedido inteiro antes da reserva das vias.
+        const payloads = await this.runPrintActionWithRetry(
+          () => this.fetchRenderedPayloads(
+            orderId,
+            availableVias.map((via) => via.printType),
+            order
+          ),
+          `render do pedido #${order.order_number || orderId}`
         );
         renderMs = this.getPrintPerformanceElapsed(renderStartedAt);
         return payloads;

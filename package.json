@@ -1,6 +1,6 @@
 {
   "name": "hub-impressao",
-  "version": "1.9.22",
+  "version": "1.9.23",
   "description": "Serviço de impressão térmica em background",
   "author": "Pedidos Hub",
   "publishConfig": {

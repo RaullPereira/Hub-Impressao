@@ -160,6 +160,37 @@ function makeListener(order) {
       assert.ok(listener.processedOrderIds.has(order.id));
     });
 
+    await test('impressora do automatico sumiu: usa a cozinha da loja, nunca a padrao', async () => {
+      const listener = new PairedPrintListener(null, {
+        adminClientId: 'store-1',
+        pairingStore: {
+          getPairing: () => ({ adminClientId: 'store-1', enabled: true }),
+          savePairing: () => {},
+          updatePairing: () => {},
+          clearPairing: () => {}
+        }
+      });
+      listener.currentPairing = { adminClientId: 'store-1' };
+      const windows = new Set(['EPSON TM-T20 Cozinha', 'Caixa']);
+      listener.printerManager = {
+        resolveAvailablePrinterName: async (name) => (windows.has(name) ? name : null)
+      };
+      Settings.getStorePrinters = () => ({
+        autoPrint: { kitchen: 'EPSON antiga', attendance: 'Caixa' },
+        kitchen: 'EPSON TM-T20 Cozinha',
+        default: 'Caixa'
+      });
+      assert.equal(await listener.resolveAutoPrintPrinterId('kitchen'), 'EPSON TM-T20 Cozinha');
+
+      // Sem impressora de cozinha cadastrada: nao cai na padrao (Caixa).
+      Settings.getStorePrinters = () => ({
+        autoPrint: { kitchen: 'EPSON antiga', attendance: 'Caixa' },
+        default: 'Caixa'
+      });
+      assert.equal(await listener.resolveAutoPrintPrinterId('kitchen'), null);
+      Settings.getStorePrinters = () => ({ autoPrint: AUTO_PRINT_MAP });
+    });
+
     await test('via sem impressora escolhida continua pulada sem erro', async () => {
       Settings.getStorePrinters = () => ({ autoPrint: { attendance: 'Caixa' } });
       const { listener, state } = makeListener(order);

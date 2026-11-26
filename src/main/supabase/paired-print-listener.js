@@ -19,6 +19,7 @@ const {
   getAutoPrintPrinterForRoute,
   normalizeAutoPrintMap,
   normalizeAutoPrintRoute,
+  normalizePrinterValue,
   isAppTableOrder
 } = require('../print-routes');
 
@@ -2109,6 +2110,22 @@ class PairedPrintListener {
     if (this.printerManager && typeof this.printerManager.resolveAvailablePrinterName === 'function') {
       const availablePrinter = await this.printerManager.resolveAvailablePrinterName(configuredPrinterId, { allowDefault: false });
       if (!availablePrinter) {
+        // A impressora escolhida no automatico sumiu do Windows (renomeada,
+        // reinstalada). Se a loja tem uma impressora cadastrada para o mesmo
+        // tipo (a que a impressao manual usa), a via sai nela. Nunca cai na
+        // impressora padrao: cozinha no caixa confunde mais do que ajuda.
+        const sameTypePrinter = normalizePrinterValue(
+          storePrinters?.[route === 'attendance' ? 'counter' : route]
+        );
+        if (sameTypePrinter && sameTypePrinter !== configuredPrinterId) {
+          const fallback = await this.printerManager.resolveAvailablePrinterName(sameTypePrinter, { allowDefault: false });
+          if (fallback) {
+            logger.warn(
+              `${this.getLogContext()} Impressora de auto-print para ${route || type} nao esta disponivel: ${configuredPrinterId}. Usando a impressora ${route || type} da loja: ${fallback}`
+            );
+            return fallback;
+          }
+        }
         logger.warn(
           `${this.getLogContext()} Impressora de auto-print para ${route || type} nao esta disponivel: ${configuredPrinterId}`
         );

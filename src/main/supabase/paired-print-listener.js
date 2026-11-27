@@ -57,6 +57,21 @@ const GESTAO_MAX_ATTEMPTS = 3;
 // comanda da cozinha sumia sem aviso (Pizza & Cia, 26/11: mesas sem cozinha).
 const FAILED_VIA_RETRY_MAX_AGE_MS = 15 * 60 * 1000;
 
+const GESTAO_ROUTE_LABELS = { kitchen: 'cozinha', bar: 'bar', counter: 'caixa' };
+
+// O que fazer com a comanda do app que falhou no meio. Se alguma via já saiu,
+// nunca volta para a fila: voltar faria a cozinha sair de novo. Fica 'failed'
+// dizendo o que saiu, para o garçom pedir só o que faltou.
+function gestaoFailureOutcome({ error, printedRoutes = [], lastTry = false, retriable = false }) {
+  const message = error?.message || 'Falha ao imprimir';
+  if (printedRoutes.length > 0) {
+    const done = printedRoutes.map((route) => GESTAO_ROUTE_LABELS[route] || route).join(', ');
+    return { status: 'failed', error: `Saiu só: ${done}. O resto falhou: ${message}` };
+  }
+  if (!error?.definitive && !lastTry && retriable) return { status: 'pending', error: null };
+  return { status: 'failed', error: message };
+}
+
 let createClientLoader = null;
 
 class SafeWebSocketTransport extends BaseWebSocketTransport {
@@ -2511,13 +2526,18 @@ class PairedPrintListener {
     return (await this.resolveAutoPrintPrinterId('attendance')) || (await this.resolveAvailablePrinterId('counter'));
   }
 
+  // Só mexe na comanda que ainda está com este Hub ('printing'): não apaga o
+  // 'failed' que o banco gravou (expirou/travou) nem o resultado de outro
+  // computador. 'printed' vale também se o banco já a devolveu para a fila
+  // ('pending'), para nenhum outro computador imprimir de novo.
   async setGestaoPrintStatus(id, status, error = null) {
     const payload = { status, error: error ? String(error).slice(0, 500) : null };
     if (status === 'printed') payload.printed_at = new Date().toISOString();
     const { error: updateError } = await this.supabase
       .from('hub_gestao_print_requests')
       .update(payload)
-      .eq('id', id);
+      .eq('id', id)
+      .in('status', status === 'printed' ? ['printing', 'pending'] : ['printing']);
     if (updateError) throw updateError;
   }
 
@@ -2547,6 +2567,9 @@ class PairedPrintListener {
         this.gestaoAttempts.delete(this.gestaoAttempts.keys().next().value);
       }
 
+      // Vias que já saíram nesta tentativa: se a próxima falhar, a comanda
+      // não volta para a fila (voltar repetiria a cozinha que já saiu).
+      const printedRoutes = [];
       try {
         await this.refreshPrintersIfNeeded();
         const barPrinter = await this.resolveGestaoRoutePrinter('bar');
@@ -2568,16 +2591,22 @@ class PairedPrintListener {
             () => this.printRawPayload(printerId, payload, job.route),
             `comanda do app ${id}`
           );
+          printedRoutes.push(job.route);
         }
         await this.setGestaoPrintStatus(id, 'printed');
         logger.info(`${this.getLogContext()} Comanda do app ${id} impressa (${jobs.map((job) => job.route).join(', ') || 'nada a imprimir'}, fonte=${source}).`);
       } catch (error) {
-        const lastTry = (this.gestaoAttempts.get(id) || 0) >= GESTAO_MAX_ATTEMPTS;
-        const retry = !error?.definitive && !lastTry && this.isRetriablePrintError(error);
-        logger.error(`${this.getLogContext()} Comanda do app ${id} não imprimiu${retry ? ' (vai tentar de novo)' : ''}:`, error?.message || error);
-        // Recuperável volta para a fila (a próxima varredura ou a aba tenta de novo);
-        // definitivo vira 'failed' com o motivo, que o app mostra para o garçom.
-        await this.setGestaoPrintStatus(id, retry ? 'pending' : 'failed', retry ? null : (error?.message || 'Falha ao imprimir'))
+        const outcome = gestaoFailureOutcome({
+          error,
+          printedRoutes,
+          lastTry: (this.gestaoAttempts.get(id) || 0) >= GESTAO_MAX_ATTEMPTS,
+          retriable: this.isRetriablePrintError(error)
+        });
+        logger.error(`${this.getLogContext()} Comanda do app ${id} não imprimiu${outcome.status === 'pending' ? ' (vai tentar de novo)' : ''}:`, error?.message || error);
+        // Recuperável e nada saiu: volta para a fila (a próxima varredura ou a
+        // aba tenta de novo). Senão vira 'failed' com o motivo, que o app
+        // mostra para o garçom.
+        await this.setGestaoPrintStatus(id, outcome.status, outcome.error)
           .catch(() => null);
       }
     } catch (error) {
@@ -3487,3 +3516,4 @@ module.exports.shouldProcessQueuedPrintJob = shouldProcessQueuedPrintJob;
 module.exports.isKdsStationPrintJob = isKdsStationPrintJob;
 module.exports.isIncompleteOrderDraft = isIncompleteOrderDraft;
 module.exports.didCompleteIncompleteOrderDraft = didCompleteIncompleteOrderDraft;
+module.exports.gestaoFailureOutcome = gestaoFailureOutcome;
